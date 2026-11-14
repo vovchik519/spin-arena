@@ -1,5 +1,5 @@
 // Match logic (singles): scoring, service order, rally refereeing, shot construction,
-// buffered human strokes and the computer opponent.
+// human strokes (you move with your thumb, a flick is the stroke) and the computer opponent.
 import * as THREE from 'three';
 import { T, BallState, step, DT, solveShot, solveServe, spinVector, predict, landsLegally } from './physics.js';
 import { Athlete } from './athlete.js';
@@ -7,12 +7,31 @@ import { Athlete } from './athlete.js';
 const UP = new THREE.Vector3(0, 1, 0);
 const rnd = (a, b) => a + Math.random() * (b - a);
 const clamp = THREE.MathUtils.clamp;
-export const PERFECT_WINDOW = 0.16;   // seconds before contact in which a release counts as perfect
+export const HUMAN_SPEED = 6;          // m/s, the legs limit you, not the finger
+const LATENCY = 0.03;                  // touch-to-frame latency compensation, s
+
+// Timing windows around the ideal contact moment; they tighten as the ball gets faster.
+export function windows(v, mult = 1) {
+  const k = clamp((v - 8) / 12, 0, 1), L = THREE.MathUtils.lerp;
+  return { P: L(0.07, 0.05, k) * mult, G: L(0.15, 0.11, k) * mult, late: L(0.12, 0.09, k) * mult };
+}
+// Where the contact point sits relative to the body: comfortable, a stretch, or out of reach.
+export function reachZone(h, cx, v) {
+  const rel = (cx - h.pos.x) * h.rs.x;
+  const grow = 0.015 * Math.max(0, v - 10);
+  const out = Math.max(0, (-0.38 - grow) - rel, rel - (0.8 + grow));
+  return out <= 0 ? 'core' : out <= 0.28 ? 'stretch' : 'out';
+}
+function sampleAt(samples, t) {
+  let best = null, bd = 1e9;
+  for (const s of samples) { const d = Math.abs(s.t - t); if (d < bd) { bd = d; best = s; } }
+  return best ? best.p.clone() : null;
+}
 
 export const DIFF = {
-  easy:   { err: 0.14, speed: 0.55, place: 0.55, spin: 0.6, crit: 0.02, move: 4.4, critResp: 0.45 },
-  pro:    { err: 0.045, speed: 0.78, place: 0.8, spin: 0.85, crit: 0.1, move: 5.2, critResp: 0.28 },
-  master: { err: 0.02, speed: 0.95, place: 0.92, spin: 1, crit: 0.18, move: 6, critResp: 0.16 },
+  easy:   { err: 0.12, speed: 0.55, place: 0.5, spin: 0.6, crit: 0.0, move: 4.4, critResp: 0.45, win: 1.35, tele: 0.45, autoBlock: true },
+  pro:    { err: 0.05, speed: 0.78, place: 0.8, spin: 0.85, crit: 0.05, move: 5.2, critResp: 0.28, win: 1, tele: 0.3, autoBlock: false },
+  master: { err: 0.02, speed: 0.95, place: 0.92, spin: 1, crit: 0.1, move: 6, critResp: 0.16, win: 0.85, tele: 0.18, autoBlock: false },
 };
 export const TEAM_STYLE = [
   { color: '#5ef0ff', accent: '#5ef0ff', hue: 192, hueAccent: 222 },
@@ -31,7 +50,7 @@ export class Match {
       const a = new Athlete(world.scene, {
         team, robot, name: robot ? 'X-Бот' : team === 0 ? 'Мишель' : 'Мишель II',
         hue: st.hue, hueAccent: st.hueAccent, accent: st.accent, body: st.body,
-        maxSpeed: human ? 6.5 : DIFF[cfg.diff].move,
+        maxSpeed: human ? HUMAN_SPEED : DIFF[cfg.diff].move,
       }, models);
       a.human = human;
       a.place(new THREE.Vector3(0.15 * (team === 0 ? 1 : -1), 0, (team === 0 ? 1 : -1) * 2.1));
@@ -58,7 +77,7 @@ export class Match {
   startPoint() {
     const st = this.serverTeam();
     const server = this.server = this.players[st], receiver = this.receiver = this.players[1 - st];
-    for (const p of this.players) { p.setPose('ready', this.now); p.hold = false; p.tossT = -1; }
+    for (const p of this.players) { p.setPose('ready', this.now); p.hold = false; p.tossT = -1; p.ctrlX = null; }
     server.place(new THREE.Vector3(server.right.x * 0.24 - server.rs.x * 0.35, 0, server.side * (T.halfL + 0.62)));
     server.hold = true;
     receiver.place(new THREE.Vector3(receiver.right.x * 0.05, 0, receiver.side * (T.halfL + 0.75)));
@@ -112,12 +131,18 @@ export class Match {
     else if (p.kind === 'smash') { depth = 0.9 + p.power * 0.3; hs = 20 + p.power * 8; top = 40; }
     else if (p.kind === 'block') { depth = rnd(0.6, 1.0); hs = rnd(5.5, 7); top = 60; }
     else { depth = 0.7 + p.power * 0.55; hs = 7.5 + p.power * 11; top = 120 + p.power * 260; }
+    if (p.depth) depth = p.depth;
     if (p.crit) { hs *= 1.4; top = top * 1.7 + 120; depth = Math.max(depth, 1.08); }
     const target = new THREE.Vector3(lateral, 0, dir * clamp(depth, 0.2, 1.3));
     const w = spinVector(new THREE.Vector3(target.x - C.x, 0, target.z - C.z), top, side);
     let v = solveShot(C, target, hs, w, p.kind === 'smash' || p.crit ? 0.015 : 0.04);
     // solver safety net: if the intended shot would not land, take pace off until it does
     for (let k = 0; k < 4 && !landsLegally(C, v, w, dir); k++) { hs *= 0.82; v = solveShot(C, target, hs, w, 0.05); }
+    if (p.dev) {
+      v.applyAxisAngle(UP, p.dev.xSign * p.dev.yaw * (dir > 0 ? 1 : -1));
+      const ax = new THREE.Vector3().crossVectors(v, UP).normalize();
+      v.applyAxisAngle(ax, p.dev.pitch);
+    }
     const e = p.error || 0;
     if (e > 0) {
       v.applyAxisAngle(UP, rnd(-1, 1) * e * 0.12);
@@ -139,6 +164,7 @@ export class Match {
     if (navigator.vibrate && hitter.human) try { navigator.vibrate(quality.crit ? [30, 30, 60] : 14); } catch (e) {}
     this.fx.impactSquash();
     this.hooks.onHit(hitter, shot, quality, this.ball.p.clone());
+    if (hitter.human) hitter.goal.z = hitter.side * (T.halfL + 0.75);
     this.planNext(this.players[1 - hitter.team]);
   }
 
@@ -156,7 +182,7 @@ export class Match {
       if (ev.type === 'floor') { ok = false; break; }
     }
     if (!ok || bounceT < 0) {
-      h.goal.set(h.pos.x * 0.6, 0, h.side * (T.halfL + 0.9));
+      if (!h.human) h.goal.set(h.pos.x * 0.6, 0, h.side * (T.halfL + 0.9));
       this.pending = { hitter: h, none: true };
       return;
     }
@@ -177,7 +203,12 @@ export class Match {
     this.pending = { hitter: h, tc, C, high, stroke, incoming: best.v.clone(), spin: best.w.clone() };
     h.planSwing(stroke, C, tc, h.fwd.clone(), this.now);
     if (h.human) {
-      this.window = { hitter: h, tIdeal: tc, C, high, queued: null, t0: this.now };
+      // depth is automatic, left/right is yours
+      this.holdLateral(h);
+      const v = best.v.length();
+      const mult = (this.cfg.opp === 'cpu' ? DIFF[this.cfg.diff].win : 1) * (this.rally.lastCrit ? 0.75 : 1);
+      this.window = { hitter: h, tIdeal: tc, C, high, t0: this.now, v, spin: best.w.clone(), samples: pr.samples,
+        minT: this.now + bounceT + 0.03, win: windows(v, mult), shot: null, missed: false };
       this.hooks.onWindow(this.window);
     } else this.scheduleAI(h);
   }
@@ -185,48 +216,84 @@ export class Match {
   scheduleAI(h) {
     const P = this.pending, d = DIFF[this.cfg.diff];
     const inc = P.incoming.length(), spin = P.spin.length();
-    let err = d.err + Math.max(0, inc - 11) * 0.007 + Math.max(0, spin - 250) * 0.0003 + (this.rally.lastCrit ? d.critResp : 0);
+    const lh = this.rally.lastHuman;
+    let err = d.err + Math.max(0, inc - 11) * 0.007 + Math.max(0, spin - 250) * 0.0003 + (this.rally.lastCrit ? d.critResp : 0)
+      + (lh ? Math.abs(lh.lateral) * 0.08 + (lh.perfect ? 0.06 : 0) : 0);
     if (this.rally.serving) err *= 0.5;
     const miss = Math.random() < err;
     const r = Math.random();
     let kind = 'drive';
     if (P.high && r < 0.75) kind = 'smash';
     else if (r < 0.15) kind = 'push';
-    const crit = !miss && kind !== 'push' && Math.random() < d.crit + (P.high ? 0.25 : 0);
+    const crit = !miss && kind !== 'push' && Math.random() < (P.high ? 0.3 + d.crit : d.crit * 0.3);
+    const opp = this.players[1 - h.team];
+    const away = -(Math.sign(opp.pos.x) || (Math.random() < 0.5 ? 1 : -1));
+    const lateral = Math.random() < 0.65 ? away * rnd(0.45, 1) * d.place : rnd(-1, 1) * d.place;
     P.ai = {
-      kind, lateral: rnd(-1, 1) * d.place, power: clamp(rnd(0.3, 1) * d.speed + (kind === 'smash' ? 0.2 : 0), 0, 1),
+      kind, lateral, power: clamp(rnd(0.3, 1) * d.speed + (kind === 'smash' ? 0.2 : 0), 0, 1),
       side: Math.random() < 0.25 ? rnd(-1, 1) * d.spin : 0,
       error: miss ? rnd(1.2, 2.4) : rnd(0, 0.3), crit, perfect: crit, whiff: miss && Math.random() < 0.15,
     };
+    P.ai.depth = kind === 'push' ? rnd(0.45, 0.8) : kind === 'smash' ? 1.05 : clamp(0.7 + P.ai.power * 0.55, 0.3, 1.25);
+    P.teleT = P.tc - d.tele; P.teleShown = false;
     if (kind !== P.stroke && (kind === 'push' || kind === 'smash')) h.planSwing(kind, P.C, P.tc, h.fwd.clone(), this.now, P.stroke === 'bh');
   }
 
-  // A swipe from a human. Shots are buffered: swipe any time while the ball comes,
-  // the stroke fires at contact. Releasing in the last moment (green ring) is perfect.
+  // ------------------------------------------------------------ human strokes
+  // Release of a flick = the stroke. Timing against the ideal contact moment decides
+  // the result deterministically: early pulls the ball cross-court and long, late pushes
+  // it wide and into the net. A very early flick is held until the earliest contact.
   humanStroke(team, p) {
     if (this.state === 'serve' && this.server.team === team && this.server.human) { this.serve(p); return 'serve'; }
     const W = this.window;
-    if (!W || W.hitter.team !== team) return null;
-    const left = W.tIdeal - this.now;
-    if (left > 1.6) return null;
-    const perfect = left <= PERFECT_WINDOW;
+    if (!W || W.hitter.team !== team || W.shot || W.missed) return null;
+    const d = this.now + LATENCY - W.tIdeal;
+    if (d < -0.6) return null;                      // far too early: treat as an accidental touch
+    const win = W.win;
+    if (d > win.late) { W.missed = true; W.missReason = 'late'; return 'late'; }
+    let e = 0;
+    if (Math.abs(d) > win.P) e = Math.sign(d) * Math.min(2, (Math.abs(d) - win.P) / (win.G - win.P));
+    const tc = d < -win.G ? Math.max(W.tIdeal - win.G, W.minT) : Math.max(this.now + 0.04, W.minT);
+    const C = sampleAt(W.samples, tc - W.t0) || W.C;
     if (W.high && p.kind === 'drive' && p.power > 0.55) p.kind = 'smash';
-    p.perfect = perfect;
-    p.crit = perfect && (p.kind === 'smash' || p.power > 0.6);
-    const pressure = this.incomingPressure();
-    p.error = perfect ? pressure * 0.25 : (p.power > 0.85 ? 0.4 : 0.1) + pressure;
-    W.queued = p;
-    const h = W.hitter, P = this.pending;
-    if (p.kind === 'push' || p.kind === 'smash') h.planSwing(p.kind, W.C, W.tIdeal, h.fwd.clone(), this.now, P?.stroke === 'bh');
-    else if (h.swing && (h.swing.type === 'push')) h.planSwing(P.stroke === 'smash' ? 'fh' : P.stroke, W.C, W.tIdeal, h.fwd.clone(), this.now);
-    this.hooks.onQueued(W, p);
-    return perfect ? 'perfect' : 'queued';
+    p.timing = e; p.perfect = e === 0;
+    W.shot = { p, tc, C };
+    const h = W.hitter;
+    const rel = (C.x - h.pos.x) * h.rs.x;
+    const bh = rel < -0.12;
+    const type = p.kind === 'push' || p.kind === 'smash' ? p.kind : bh ? 'bh' : 'fh';
+    h.planSwing(type, C, tc, h.fwd.clone(), this.now, bh);
+    this.holdLateral(h);
+    const tag = e === 0 ? 'perfect' : Math.abs(e) <= 1 ? (e < 0 ? 'early' : 'late') : (e < 0 ? 'very-early' : 'very-late');
+    this.hooks.onSwing(W, p, tag);
+    return tag;
   }
 
-  // How hard the incoming ball is to handle: pace, spin and a crit from the other side.
-  incomingPressure() {
-    const P = this.pending; if (!P || !P.incoming) return 0;
-    return Math.max(0, P.incoming.length() - 10) * 0.035 + Math.max(0, P.spin.length() - 250) * 0.0012 + (this.rally.lastCrit ? 0.9 : 0);
+  holdLateral(h) { h.goal.x = h.ctrlX ?? h.pos.x; }
+
+  fireHuman(W) {
+    const h = W.hitter, p = W.shot.p, ball = this.ball;
+    const zone = reachZone(h, ball.p.x, W.v);
+    if (zone === 'out') { W.missed = true; W.missReason = 'far'; return; }
+    const stretch = zone === 'stretch';
+    if (stretch) p.power = Math.min(p.power, 0.6);
+    p.crit = p.perfect && !stretch && (p.kind === 'smash' || p.power >= 0.75);
+    // deterministic deviation from timing, scaled by pace, ambition and reach
+    const e = p.timing, ae = Math.abs(e);
+    const scale = (0.6 + 0.8 * p.power) * (1 + 0.03 * Math.max(0, W.v - 10)) * (1 + 0.4 * Math.abs(p.lateral))
+      * (stretch ? 2 : 1) * (this.rally.lastCrit ? 1.3 : 1);
+    const cx = Math.sign(ball.p.x) || 1;
+    let yaw = THREE.MathUtils.degToRad(6 * ae * scale + (stretch ? 3 : 0));
+    let pitch = THREE.MathUtils.degToRad(e < 0 ? 1.2 * ae * scale : -1.5 * ae * scale);
+    // reading spin: a drive against backspin sinks, a push against topspin floats
+    const top = W.spin.dot(new THREE.Vector3(0, 1, 0).cross(new THREE.Vector3(0, 0, h.side)));
+    if (!p.perfect && p.kind !== 'push' && top < -60) pitch -= THREE.MathUtils.degToRad(1.4 * Math.min(2, -top / 250));
+    if (!p.perfect && p.kind === 'push' && top > 60) pitch += THREE.MathUtils.degToRad(1.6 * Math.min(2, top / 250));
+    p.dev = { xSign: e < 0 ? -cx : cx, yaw, pitch };
+    p.error = 0;
+    this.rally.lastHuman = { lateral: p.lateral, perfect: p.perfect };
+    const shot = this.buildShot(h, ball.p.clone(), p);
+    this.launch(h, shot, { crit: p.crit, perfect: p.perfect, kind: p.kind, timing: e, zone });
   }
 
   pointTo(team, reason) {
@@ -308,15 +375,34 @@ export class Match {
       this.state = 'rally';
       this.launch(this.server, this.buildServe(this.serveParams), { serve: true });
     }
+    for (const p of this.players) if (p.human && p.ctrlX != null && !(this.state === 'serve' && p === this.server)) p.goal.x = p.ctrlX;
     const P = this.pending;
-    if (this.state === 'rally' && P && !P.none && this.now >= P.tc) {
+    if (this.state === 'rally' && P && !P.none) {
       if (!P.hitter.human) {
-        if (P.ai.whiff) this.pending = null;
-        else this.launch(P.hitter, this.buildShot(P.hitter, ball.p.clone(), P.ai), { crit: P.ai.crit, perfect: P.ai.perfect, kind: P.ai.kind });
+        if (!P.teleShown && this.now >= P.teleT) {
+          P.teleShown = true;
+          const dir = -P.hitter.side;
+          this.hooks.onTelegraph(new THREE.Vector3(clamp(P.ai.lateral, -1, 1) * 0.64, T.top, dir * P.ai.depth), P.hitter.team);
+        }
+        if (this.now >= P.tc) {
+          if (P.ai.whiff) this.pending = null;
+          else this.launch(P.hitter, this.buildShot(P.hitter, ball.p.clone(), P.ai), { crit: P.ai.crit, perfect: P.ai.perfect, kind: P.ai.kind });
+        }
       } else if (this.window) {
-        let q = this.window.queued, auto = false;
-        if (!q) { q = { kind: 'block', lateral: rnd(-0.4, 0.4), power: 0.2, error: 0.4 + this.incomingPressure() * 1.3 }; auto = true; }
-        this.launch(P.hitter, this.buildShot(P.hitter, ball.p.clone(), q), { crit: q.crit, perfect: q.perfect, kind: q.kind, auto });
+        const W = this.window;
+        if (W.shot && !W.missed && this.now >= W.shot.tc) this.fireHuman(W);
+        else if (!W.shot && !W.missed && this.now > W.tIdeal + W.win.late) {
+          const easy = this.cfg.opp === 'cpu' && DIFF[this.cfg.diff].autoBlock;
+          if (easy && reachZone(W.hitter, ball.p.x, W.v) === 'core') {
+            const q = { kind: 'block', lateral: 0, power: 0.2, depth: 0.5 };
+            this.launch(W.hitter, this.buildShot(W.hitter, ball.p.clone(), q), { kind: 'block', auto: true });
+          } else { W.missed = true; W.missReason = 'none'; }
+        }
+        if (W.missed && this.window === W) {
+          this.hooks.onMissWindow(W, W.missReason);
+          W.hitter.goal.z = W.hitter.side * (T.halfL + 0.75);
+          this.window = null; this.pending = null;
+        }
       }
     }
     if (this.inFlight && this.state !== 'serve') {

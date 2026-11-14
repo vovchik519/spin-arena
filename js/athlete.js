@@ -257,12 +257,14 @@ export class Athlete {
   // ---------------------------------------------------------------- per frame
   update(dt, now, ballPos) {
     // locomotion
+    if (!Number.isFinite(this.goal.x) || !Number.isFinite(this.goal.z)) this.goal.copy(this.pos);
     const d = v1.subVectors(this.goal, this.pos); d.y = 0;
     const want = v2.copy(d).multiplyScalar(7);
     if (want.length() > this.maxSpeed) want.setLength(this.maxSpeed);
     const dv = v3.subVectors(want, this.vel); const acc = 30 * dt;
     if (dv.length() > acc) dv.setLength(acc);
     this.vel.add(dv); this.pos.addScaledVector(this.vel, dt);
+    if (!Number.isFinite(this.pos.x) || !Number.isFinite(this.pos.z)) { this.pos.set(0, 0, this.side * 2.1); this.vel.set(0, 0, 0); this.goal.copy(this.pos); }
     const minZ = T.halfL + 0.32;
     if (this.pos.z * this.side < minZ) { this.pos.z = this.side * minZ; this.vel.z = 0; }
     this.pos.x = clamp(this.pos.x, -3.3, 3.3);

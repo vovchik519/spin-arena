@@ -78,6 +78,14 @@ export class FX {
     const mk = new THREE.Mesh(new THREE.RingGeometry(0.045, 0.07, 32),
       new THREE.MeshBasicMaterial({ color: 0x7ff0ff, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending }));
     mk.rotation.x = -Math.PI / 2; mk.visible = false; scene.add(mk); this.marker = mk;
+    // where the incoming ball will be met: a floor ring on the hitting line, coloured by reach
+    const rr = new THREE.Mesh(new THREE.RingGeometry(0.15, 0.21, 40),
+      new THREE.MeshBasicMaterial({ color: 0x7dffb4, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending }));
+    rr.rotation.x = -Math.PI / 2; rr.visible = false; scene.add(rr); this.reachRing = rr;
+    // opponent's telegraphed target on your half
+    const tm = new THREE.Mesh(new THREE.RingGeometry(0.06, 0.1, 32),
+      new THREE.MeshBasicMaterial({ color: 0xc9a2ff, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending }));
+    tm.rotation.x = -Math.PI / 2; tm.visible = false; scene.add(tm); this.tele = tm; this.teleLife = 0;
     this.flash = 0;
   }
 
@@ -131,6 +139,14 @@ export class FX {
     r.billboard = !flatOnTable && !faceDir;
   }
 
+  showReach(p, color) {
+    this.reachRing.visible = !!p;
+    if (p) { this.reachRing.position.set(p.x, 0.006, p.z); this.reachRing.material.color.set(color); }
+  }
+  showTele(p, color) {
+    this.tele.visible = true; this.teleLife = 1.1;
+    this.tele.position.set(p.x, T.top + 0.004, p.z); this.tele.material.color.set(color);
+  }
   showMarker(p, color) {
     this.marker.visible = !!p;
     if (p) { this.marker.position.set(p.x, T.top + 0.003, p.z); this.marker.material.color.set(color); }
@@ -175,6 +191,14 @@ export class FX {
     }
     this.ballMat.emissive.setRGB(heat * 0.3, heat * 0.8, heat * 1.0);
     this.marker.scale.setScalar(1 + Math.sin(time * 8) * 0.12);
+    this.reachRing.scale.setScalar(1 + Math.sin(time * 10) * 0.06);
+    if (this.teleLife > 0) {
+      this.teleLife -= dt;
+      const k = Math.max(0, this.teleLife / 1.1);
+      this.tele.material.opacity = Math.min(1, k * 1.6);
+      this.tele.scale.setScalar(2.2 - 1.2 * Math.min(1, (1.1 - this.teleLife) * 3));
+      if (this.teleLife <= 0) this.tele.visible = false;
+    }
   }
 }
 const v = new THREE.Vector3();

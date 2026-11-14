@@ -6,7 +6,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { createWorld, MOBILE } from './scene.js';
 import { FX, Sound } from './fx.js';
-import { Match, TEAM_STYLE, PERFECT_WINDOW } from './match.js';
+import { Match, TEAM_STYLE, reachZone } from './match.js';
 import { loadModels } from './athlete.js';
 import { T } from './physics.js';
 
@@ -51,17 +51,27 @@ function hooks() {
     onServeReady(server) {
       updateHud();
       if (demo) return;
-      if (server.human) showHint(server.team, 'Ваша подача: свайп к сопернику · тап — короткая');
+      if (server.human) showHint(server.team, tutorial > 0 ? 'Подача: резкий свайп к сопернику · к себе — короткая с подрезкой' : 'Ваша подача');
       else showHint(null);
     },
-    onWindow(W) { if (!demo) showHint(W.hitter.team, 'Свайп — удар · отпустите на зелёном кольце = КРИТ'); },
-    onQueued(W, p) {
-      if (demo) return;
-      showHint(W.hitter.team, p.perfect ? 'Идеальный тайминг!' : 'Удар готов · можно переиграть на зелёном');
-      const dir = W.hitter.team === 0 ? -1 : 1;
-      const depth = p.kind === 'push' ? 0.6 : 0.7 + p.power * 0.55;
-      fx.showMarker(new THREE.Vector3(clamp(p.lateral, -1, 1) * 0.64, 0, dir * depth), p.perfect ? 0x7dffb4 : TEAM_STYLE[W.hitter.team].color);
+    onWindow(W) {
+      if (demo || tutorial <= 0) return;
+      showHint(W.hitter.team, tutorial >= 3 ? 'Ведите пальцем — игрок идёт за ним. Встаньте на кольцо на полу'
+        : tutorial === 2 ? 'Резкий свайп к сопернику, когда кольцо у мяча станет зелёным' : 'Наклон свайпа — направление. Сильнее удар — точнее тайминг');
     },
+    onSwing(W, p, tag) {
+      if (demo) return;
+      const team = W.hitter.team;
+      const dir = team === 0 ? -1 : 1;
+      fx.showMarker(new THREE.Vector3(clamp(p.lateral, -1, 1) * 0.64, 0, dir * (p.kind === 'push' ? 0.6 : 0.7 + p.power * 0.55)), tag === 'perfect' ? 0x7dffb4 : TEAM_STYLE[team].color);
+      const txt = { 'perfect': 'Идеально', 'early': 'Рано', 'late': 'Поздно', 'very-early': 'Слишком рано', 'very-late': 'Слишком поздно' }[tag];
+      if (tag !== 'perfect') feedback(team, txt, 'miss');
+    },
+    onMissWindow(W, reason) {
+      if (demo) return;
+      feedback(W.hitter.team, reason === 'far' ? 'Не дотянулись' : reason === 'late' ? 'Поздно' : 'Не ударили', 'miss');
+    },
+    onTelegraph(pt, team) { if (!demo) fx.showTele(pt, TEAM_STYLE[team].color); },
     onHit(hitter, shot, q, p) {
       fx.showMarker(null);
       const speed = shot.v.length(), col = TEAM_STYLE[hitter.team].color;
@@ -75,10 +85,11 @@ function hooks() {
         snd.boom(); world.crowd.cheer(1); flash();
         banner(q.kind === 'smash' ? 'СМЭШ!' : 'КРИТ!', 'crit', `${Math.round(speed * 3.6)} км/ч`);
         hitter.setColorBoost(1); setTimeout(() => hitter.setColorBoost(0), 900);
-      } else if (q.perfect && hitter.human) { fx.ring(p, 0x7dffb4, 0.5, 0.35); banner('Идеально', 'good'); }
-      else if (q.auto && !demo) banner('Блок', 'miss', 'свайпните, чтобы ударить сильнее');
+      } else if (q.perfect && hitter.human) { fx.ring(p, 0x7dffb4, 0.5, 0.35); feedback(hitter.team, 'Идеально', 'good'); }
+      else if (q.auto && !demo) feedback(hitter.team, 'Автоблок · свайпните сами', 'miss');
       else if (q.kind === 'smash') { shake = 0.025; fx.ring(p, col, 0.6, 0.3); }
-      if (!demo) showHint(null);
+      if (!demo) { showHint(null); if (hitter.human && tutorial > 0) tutorial--; }
+      if (!demo && q.zone === 'stretch') feedback(hitter.team, 'В последний момент', 'miss');
     },
     onBounce(ev) {
       const p = new THREE.Vector3(ev.x, T.top + 0.004, ev.z);
@@ -120,12 +131,14 @@ function newMatch(c, isDemo) {
 function startDemo() { newMatch({ opp: 'cpu' }, true); camMode = 'orbit'; cine = null; match.begin(); }
 function startGame() {
   newMatch(cfg, false);
+  tutorial = 3;
   camMode = cfg.opp === 'friend' ? 'broadcast' : 'play';
   startCine('intro', 3.6);
   setTimeout(() => banner(`Партия 1`, 'big', cfg.opp === 'cpu' ? 'Вы против X-Бота' : 'Игрок 1 против Игрока 2'), 400);
 }
 
 // ------------------------------------------------------------ camera
+const finite = v => Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
 function startCine(kind, dur, team) {
   const a0 = Math.atan2(camPos.x, camPos.z);
   cine = { kind, t0: realT, dur, team, a0 };
@@ -151,6 +164,10 @@ function gameplayCam(aspect) {
   return { P, L, fov };
 }
 function updateCamera(dt) {
+  // a bad frame (NaN) must never poison the smoothed camera state
+  if (!finite(camPos)) camPos.set(5, 3, 5);
+  if (!finite(camLook)) camLook.set(0, 0.8, 0);
+  if (!finite(camera.up) || camera.up.lengthSq() < 1e-6) camera.up.set(0, 1, 0);
   const aspect = innerWidth / innerHeight;
   let { P, L, fov } = gameplayCam(aspect);
   let k = 1 - Math.exp(-dt * 5);
@@ -188,6 +205,7 @@ function updateCamera(dt) {
       k = 1 - Math.exp(-dt * 3);
     }
   }
+  if (!finite(P) || !finite(L) || !Number.isFinite(k)) { window.__camNaN = { P: P.toArray(), L: L.toArray(), k, cine: cine && cine.kind, mode: camMode }; return; }
   camPos.lerp(P, k); camLook.lerp(L, k);
   camera.up.lerp(camUp, k).normalize();
   camera.position.copy(camPos);
@@ -202,59 +220,91 @@ function updateCamera(dt) {
 }
 
 // ------------------------------------------------------------ input
+// Hold a thumb in your half: the player follows it left/right. A quick flick toward the
+// opponent is a stroke (the release is the hit); a quick flick toward yourself is a push.
 const swipeCv = $('swipe'), sctx = swipeCv.getContext('2d');
 const touches = new Map(), fading = [];
 const toScreen = v => { const p = v.clone().project(camera); return new THREE.Vector2((p.x + 1) / 2 * innerWidth, (1 - p.y) / 2 * innerHeight); };
 function teamBasis(team) {
   const own = new THREE.Vector3(0, T.top, team === 0 ? T.halfL : -T.halfL);
   const opp = new THREE.Vector3(0, T.top, -own.z);
-  const right = new THREE.Vector3(team === 0 ? 1 : -1, 0, 0);
-  const a = toScreen(own), b = toScreen(opp), c = toScreen(own.clone().addScaledVector(right, 0.6));
+  const a = toScreen(own), b = toScreen(opp);
   const f = b.clone().sub(a).normalize();
-  const r = c.clone().sub(a); r.sub(f.clone().multiplyScalar(r.dot(f))).normalize();
-  return { own: a, f, r };
+  // the court's x axis on screen, measured along the player's hitting line
+  const line = (team === 0 ? 1 : -1) * (T.halfL + 0.6);
+  const xa = toScreen(new THREE.Vector3(-1, 0.9, line)), xb = toScreen(new THREE.Vector3(1, 0.9, line));
+  const xs = xb.clone().sub(xa).normalize();
+  const r = team === 0 ? xs.clone() : xs.clone().negate();   // the player's own right on screen
+  return { f, r, xs };
 }
+function duo() { return cfg.opp === 'friend' && !demo; }
 function teamForPoint(x, y) {
-  if (cfg.opp !== 'friend' || demo) return 0;
+  if (!duo()) return 0;
   const portrait = innerWidth < innerHeight;
-  return portrait ? (y > innerHeight / 2 ? 0 : 1) : (x < innerWidth / 2 ? 0 : 1);
+  const u = portrait ? y / innerHeight : x / innerWidth;
+  if (Math.abs(u - 0.5) < 0.04) return -1;                       // dead zone on the centre line
+  return portrait ? (u > 0.5 ? 0 : 1) : (u < 0.5 ? 0 : 1);
 }
-function swipeParams(tr) {
-  const pts = tr.pts, s = pts[0], e = pts[pts.length - 1];
+// absolute mapping: the whole width of your half spans 2.5 m of court
+function thumbToCourtX(team, x, y) {
+  const B = teamBasis(team);
+  if (!Number.isFinite(B.xs.x) || B.xs.lengthSq() < 0.5) return null;
+  const horiz = Math.abs(B.xs.x) >= Math.abs(B.xs.y);
+  const half = horiz ? innerWidth / 2 : innerHeight / 2;
+  const u = horiz ? (x - innerWidth / 2) * Math.sign(B.xs.x) : (y - innerHeight / 2) * Math.sign(B.xs.y);
+  return clamp(u / (half * 0.85), -1, 1) * 1.25;
+}
+const humanPlayer = team => match && !demo ? match.players[team] : null;
+
+function flickParams(tr) {
+  // the stroke is the fast tail of the gesture (last ~180 ms)
+  const pts = tr.pts, e = pts[pts.length - 1];
+  let i = pts.length - 1;
+  while (i > 0 && e.t - pts[i - 1].t <= 180) i--;
+  const s = pts[i];
   const B = teamBasis(tr.team);
   const vec = new THREE.Vector2(e.x - s.x, e.y - s.y);
   const len = vec.length(), norm = Math.min(innerWidth, innerHeight);
-  const dur = Math.max(0.05, (e.t - s.t) / 1000);
+  const dur = Math.max(0.03, (e.t - s.t) / 1000);
+  const speed = len / dur;
   const f = vec.dot(B.f), l = vec.dot(B.r);
+  if (len < 28 || speed < 450) return null;                   // a slide, not a flick
   let curv = 0;
-  if (len > 10) {
-    const n = new THREE.Vector2(-vec.y / len, vec.x / len);
-    for (const p of pts) { const d = (p.x - s.x) * n.x + (p.y - s.y) * n.y; if (Math.abs(d) > Math.abs(curv)) curv = d; }
-    curv /= len; curv *= Math.sign(n.dot(B.r)) || 1;
-  }
-  if (len < norm * 0.045) return { kind: 'push', lateral: 0, power: 0.3, side: 0, tap: true };
+  const n = new THREE.Vector2(-vec.y / len, vec.x / len);
+  for (let k = i; k < pts.length; k++) { const d = (pts[k].x - s.x) * n.x + (pts[k].y - s.y) * n.y; if (Math.abs(d) > Math.abs(curv)) curv = d; }
+  curv = curv / len * (Math.sign(n.dot(B.r)) || 1);
   const ln = len / norm;
-  if (f < -norm * 0.03) return { kind: 'push', lateral: clamp(Math.atan2(l, -f) / 0.5, -1, 1), power: 0.3, side: clamp(curv * 5, -1, 1) };
-  const power = clamp(0.55 * ln / 0.4 + 0.45 * (ln / dur) / 2.2, 0, 1);
-  return { kind: 'drive', lateral: clamp(Math.atan2(l, Math.max(f, 1)) / 0.5, -1, 1), power, side: clamp(curv * 4, -1, 1) };
+  if (f < -len * 0.5) return { kind: 'push', lateral: clamp(Math.atan2(l, -f) / 0.5, -1, 1), power: 0.3, side: clamp(curv * 4, -1, 1), startIdx: i };
+  if (f < len * 0.5) return null;
+  const power = clamp(0.45 * ln / 0.32 + 0.55 * (speed / norm) / 3.2, 0, 1);
+  return { kind: 'drive', lateral: clamp(Math.atan2(l, f) / 0.5, -1, 1), power, side: clamp(curv * 4, -1, 1), startIdx: i };
 }
-function aimPreview(tr) {
-  if (!match || demo) return;
-  const p = swipeParams(tr), dir = tr.team === 0 ? -1 : 1;
-  const depth = p.kind === 'push' ? 0.6 : 0.7 + p.power * 0.55;
-  fx.showMarker(new THREE.Vector3(p.lateral * 0.64, 0, dir * depth), TEAM_STYLE[tr.team].color);
-}
+
 canvas.addEventListener('pointerdown', e => {
   snd.unlock();
   if (demo || paused || !match || cine) return;
+  const team = teamForPoint(e.clientX, e.clientY);
+  if (team < 0) return;
+  for (const tr of touches.values()) if (tr.team === team) return;   // one thumb per player
   canvas.setPointerCapture?.(e.pointerId);
-  touches.set(e.pointerId, { team: teamForPoint(e.clientX, e.clientY), pts: [{ x: e.clientX, y: e.clientY, t: performance.now() }] });
+  const t = performance.now();
+  const tr = { team, pts: [{ x: e.clientX, y: e.clientY, t }], ctrl: [] };
+  touches.set(e.pointerId, tr);
+  moveWithThumb(tr, e.clientX, e.clientY, t);
 });
+function moveWithThumb(tr, x, y, t) {
+  const p = humanPlayer(tr.team); if (!p) return;
+  const cx = thumbToCourtX(tr.team, x, y);
+  tr.ctrl.push({ t, x: cx });
+  if (tr.ctrl.length > 40) tr.ctrl.shift();
+  if (Number.isFinite(cx)) p.ctrlX = cx;
+}
 canvas.addEventListener('pointermove', e => {
   const tr = touches.get(e.pointerId); if (!tr) return;
-  tr.pts.push({ x: e.clientX, y: e.clientY, t: performance.now() });
-  if (tr.pts.length > 60) tr.pts.splice(1, 1);
-  if (tr.pts.length > 3) aimPreview(tr);
+  const t = performance.now();
+  tr.pts.push({ x: e.clientX, y: e.clientY, t });
+  if (tr.pts.length > 80) tr.pts.splice(1, 1);
+  moveWithThumb(tr, e.clientX, e.clientY, t);
 });
 const endTouch = e => {
   const tr = touches.get(e.pointerId); if (!tr) return;
@@ -262,8 +312,14 @@ const endTouch = e => {
   tr.pts.push({ x: e.clientX, y: e.clientY, t: performance.now() });
   tr.fade = 1; fading.push(tr);
   if (!match || demo || paused) return;
-  const res = match.humanStroke(tr.team, swipeParams(tr));
-  if (!res) fx.showMarker(null);
+  const fp = flickParams(tr);
+  if (!fp) return;
+  // the flick's sideways motion must not drag the player: restore where the thumb was before it
+  const p = humanPlayer(tr.team), t0 = tr.pts[fp.startIdx].t;
+  const before = [...tr.ctrl].reverse().find(c => c.t <= t0);
+  if (p && before && Number.isFinite(before.x)) p.ctrlX = before.x;
+  const res = match.humanStroke(tr.team, fp);
+  if (res === null && match.window?.hitter.team === tr.team) feedback(tr.team, 'Рано', 'miss');
 };
 canvas.addEventListener('pointerup', endTouch);
 canvas.addEventListener('pointercancel', endTouch);
@@ -340,6 +396,15 @@ function banner(text, kind = 'info', sub = '') {
   bannerTimer = setTimeout(() => b.className = '', kind === 'crit' ? 1500 : 1200);
 }
 function flash() { const f = $('flash'); f.classList.remove('go'); void f.offsetWidth; f.classList.add('go'); }
+let tutorial = 3;
+const fbTimers = [0, 0];
+// short result text: centre banner vs the computer, the player's own half when two play
+function feedback(team, text, kind) {
+  if (!duo()) { banner(text, kind); return; }
+  const h = $('hint' + team);
+  h.hidden = false; h.textContent = text; h.dataset.kind = kind;
+  clearTimeout(fbTimers[team]); fbTimers[team] = setTimeout(() => { h.hidden = true; }, 900);
+}
 function showHint(team, text) {
   for (const t of [0, 1]) {
     const h = $(`hint${t}`), show = !!text && team === t;
@@ -419,16 +484,18 @@ function tick(rdt, draw = true) {
     fx.ball.visible = match.state !== 'intro';
     if (match.inFlight && match.state !== 'serve') fx.pushTrail(match.ball.p, fx.trailHeat);
     const W = match.window;
-    if (W && !demo) {
-      const left = W.tIdeal - match.now;
-      fx.timing.visible = left < 1.2 && left > -0.02;
+    if (W && !demo && !W.missed) {
+      const left = W.tIdeal - match.now, total = Math.max(0.2, W.tIdeal - W.t0);
+      // ring shrinks over the ball's whole flight, so fast balls get a full countdown too
+      fx.timing.visible = !W.shot && left > -W.win.late;
       fx.timing.position.copy(match.ball.p);
-      fx.timing.scale.setScalar(0.07 + Math.max(0, left) * 0.5);
-      const perfect = left <= PERFECT_WINDOW;
-      const queuedPerfect = W.queued?.perfect;
-      fx.timing.material.color.set(queuedPerfect || perfect ? 0x7dffb4 : W.queued ? 0x8ff6ff : 0xffffff);
-      fx.timing.material.opacity = clamp(1.3 - left, 0.25, 1);
-    } else fx.timing.visible = false;
+      fx.timing.scale.setScalar(0.06 + clamp(left / total, 0, 1) * 0.55);
+      const inP = Math.abs(left) <= W.win.P, inG = Math.abs(left) <= W.win.G;
+      fx.timing.material.color.set(inP ? 0x7dffb4 : inG ? 0x8ff6ff : 0xffffff);
+      fx.timing.material.opacity = inG ? 1 : 0.6;
+      const h = W.hitter, zone = reachZone(h, W.C.x, W.v);
+      fx.showReach(new THREE.Vector3(W.C.x, 0, h.side * (T.halfL + 0.45)), zone === 'core' ? 0x7dffb4 : zone === 'stretch' ? 0xffffff : 0x8a93b8);
+    } else { fx.timing.visible = false; fx.showReach(null); }
   }
   world.crowd.update(realT, rdt);
   fx.update(dt || rdt * 0.2, camera, realT);
