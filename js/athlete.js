@@ -285,7 +285,7 @@ export class Athlete {
     const Sl = this.swing;
     if (Sl && Sl.lunge && Sl.stance) {
       const dl = now - Sl.tc;
-      if (dl > -0.2 && dl < 0.03) { // last-moment lunge so the blade really meets the ball
+      if (dl > -0.2 && dl < 0.12) { // last-moment lunge so the blade really meets the ball
         const k = 1 - Math.exp(-dt * 16);
         this.pos.x += (Sl.stance.x - this.pos.x) * k; this.pos.z += (Sl.stance.z - this.pos.z) * k;
         if (this.pos.z * this.side < minZ) this.pos.z = this.side * minZ;

@@ -7,9 +7,11 @@ import { Athlete } from './athlete.js';
 const UP = new THREE.Vector3(0, 1, 0);
 const rnd = (a, b) => a + Math.random() * (b - a);
 const clamp = THREE.MathUtils.clamp;
-export const HUMAN_SPEED = 8;          // m/s, the legs limit you, not the finger
+export const HUMAN_SPEED = 10;          // m/s, the legs limit you, not the finger
 const RACKET_OFFSET = 0.32;            // racket sits this far to the racket-hand side of the body
-const SWEET = 0.1;                     // half-width of the racket's sweet spot, m
+const SWEET = 0.1;
+const LATE_WINDOW = 0.09;              // a stroke up to this long after the ideal moment still connects
+const BASE_DEPTH = T.halfL + 0.62;     // the human's ready line behind the end line                    // half-width of the racket's sweet spot, m
 export const CHARGE_MAX = 3;           // clean hits in a row that load a super shot
 
 // Timing windows around the ideal contact moment; they tighten as the ball gets faster.
@@ -47,7 +49,7 @@ export class Match {
         hue: st.hue, hueAccent: st.hueAccent, accent: st.accent, body: st.body,
         maxSpeed: human ? HUMAN_SPEED : DIFF[cfg.diff].move,
       }, models);
-      a.human = human; if (human) a.accel = 48;
+      a.human = human; if (human) a.accel = 75;
       a.place(new THREE.Vector3(0.15 * (team === 0 ? 1 : -1), 0, (team === 0 ? 1 : -1) * 2.1));
       this.players.push(a);
     }
@@ -125,19 +127,21 @@ export class Match {
     let depth, hs, top;
     const sc = p.spinScale ?? 1;
     const side = -(p.side || 0) * 90 * sc;   // positive = curves to the hitter's right
-    const lateral = clamp(p.lateral, -1, 1) * 0.64 * hitter.rs.x;
+    const lateral = clamp(p.lateral, -1.7, 1.7) * 0.62 * hitter.rs.x;
     if (p.kind === 'push') { depth = rnd(0.45, 0.85); hs = rnd(4.2, 5.5); top = -(150 + 130 * (p.chop ?? Math.random())) * sc; }
     else if (p.kind === 'loop') { depth = 0.85 + p.power * 0.35; hs = 7 + p.power * 7; top = (320 + p.power * 240) * sc; }
     else if (p.kind === 'smash') { depth = 0.9 + p.power * 0.3; hs = 20 + p.power * 8; top = 40; }
     else if (p.kind === 'block') { depth = rnd(0.6, 1.0); hs = rnd(4.3, 5.3); top = 20; }
-    else { depth = 0.7 + p.power * 0.55; hs = 7.5 + p.power * 11; top = (110 + p.power * 190) * sc; }
+    else { depth = 0.55 + p.power * 0.95; hs = 7.5 + p.power * 11; top = (110 + p.power * 190) * sc; }   // flat and too hard = long
     if (p.depth) depth = p.depth;
     if (p.crit) { hs *= 1.4; top = top * 1.7 + 120; depth = Math.max(depth, 1.08); }
-    const target = new THREE.Vector3(lateral, 0, dir * clamp(depth, 0.2, 1.3));
+    const target = new THREE.Vector3(lateral, 0, dir * clamp(depth, 0.2, 1.75));
     const w = spinVector(new THREE.Vector3(target.x - C.x, 0, target.z - C.z), top, side);
     let v = solveShot(C, target, hs, w, p.kind === 'smash' || p.crit ? 0.015 : 0.04);
     // solver safety net: if the intended shot would not land, take pace off until it does
-    for (let k = 0; k < 4 && !landsLegally(C, v, w, dir); k++) { hs *= 0.82; v = solveShot(C, target, hs, w, 0.05); }
+    // solver safety net only for shots aimed at the table; an aim off the table is the player's choice
+    const onTable = Math.abs(target.x) < T.halfW - 0.02 && Math.abs(target.z) < T.halfL - 0.02;
+    for (let k = 0; onTable && k < 4 && !landsLegally(C, v, w, dir); k++) { hs *= 0.82; v = solveShot(C, target, hs, w, 0.05); }
     if (p.dev) {
       v.applyAxisAngle(UP, p.dev.xSign * p.dev.yaw * (dir > 0 ? 1 : -1));
       const ax = new THREE.Vector3().crossVectors(v, UP).normalize();
@@ -167,7 +171,6 @@ export class Match {
     if (navigator.vibrate && hitter.human) try { navigator.vibrate(quality.crit ? [30, 30, 60] : 14); } catch (e) {}
     this.fx.impactSquash();
     this.hooks.onHit(hitter, shot, quality, this.ball.p.clone());
-    if (hitter.human) hitter.goal.z = hitter.side * (T.halfL + 0.75);
     this.planNext(this.players[1 - hitter.team]);
   }
 
@@ -198,13 +201,23 @@ export class Match {
       else if (Math.abs(s.p.z) < T.halfL - 0.1) best = s;
       else break;
     }
+    // a human meets the ball a little later, as it starts to drop at the ready line:
+    // more time to get there, and still a natural hitting height
+    if (best && h.human) {
+      for (const s2 of pr.samples) {
+        if (s2.t <= best.t) continue;
+        if (s2.p.y < T.top + 0.12 || Math.abs(s2.p.z) > BASE_DEPTH - 0.1) break;
+        best = s2;
+        if (s2.p.y < apexY - 0.12) break;
+      }
+    }
     if (!best) { this.pending = { hitter: h, none: true }; return; }
     const tc = this.now + best.t, C = best.p.clone();
     const high = C.y > T.top + 0.38;
     const rel = new THREE.Vector3().subVectors(C, h.pos).dot(h.rs);
     const stroke = high ? 'smash' : rel > -0.12 ? 'fh' : 'bh';
     this.pending = { hitter: h, tc, C, high, stroke, incoming: best.v.clone(), spin: best.w.clone() };
-    h.planSwing(stroke, C, tc, h.fwd.clone(), this.now);
+    if (!h.human) h.planSwing(stroke, C, tc, h.fwd.clone(), this.now);
     if (h.human) {
       // depth is automatic, left/right is yours
       this.holdLateral(h);
@@ -235,7 +248,7 @@ export class Match {
     const crit = !miss && kind !== 'push' && Math.random() < (P.high || soft ? 0.25 + d.crit : d.crit * 0.3);
     const opp = this.players[1 - h.team];
     const away = -(Math.sign(opp.pos.x) || (Math.random() < 0.5 ? 1 : -1));
-    const lateral = (Math.random() < 0.65 + 0.25 * press ? away * rnd(0.5 + 0.3 * press, 1) * d.place : rnd(-1, 1) * d.place) * h.rs.x;
+    const lateral = (Math.random() < 0.45 + 0.35 * press ? away * rnd(0.35 + 0.35 * press, 0.95) * d.place : rnd(-0.8, 0.8) * d.place) * h.rs.x;
     if (kind === 'drive' && !soft && Math.random() < d.loop) kind = 'loop';
     P.ai = {
       kind, lateral, power: clamp(rnd(0.3, 1) * d.speed + press * 0.3 + (soft ? 0.35 : 0) + (kind === 'smash' ? 0.2 : 0), 0, 1),
@@ -259,26 +272,29 @@ export class Match {
   racketX(h) { return h.pos.x + RACKET_OFFSET * h.rs.x; }
   reachMult() { return this.cfg.opp === 'cpu' ? DIFF[this.cfg.diff].reach : 1; }
   // how well the racket covers the ball: 'sweet' | 'hit' | 'out'
-  coverage(h, ballX, v) {
-    const R = (0.4 + 0.012 * Math.max(0, v - 10)) * this.reachMult();
+  coverage(h, ballX, v, bonus = 0) {
+    const R = (0.46 + 0.012 * Math.max(0, v - 10)) * this.reachMult() + bonus;
     const d = Math.abs(ballX - this.racketX(h));
     return { d, R, sweet: SWEET * this.reachMult(), zone: d <= SWEET * this.reachMult() ? 'sweet' : d <= R ? 'hit' : 'out' };
   }
 
-  resolveHuman(W) {
+  resolveHuman(W, sw, late = 0) {
     const h = W.hitter, ball = this.ball;
-    const cov = W.cov || this.coverage(h, ball.p.x, W.v);
+    if (!sw.touching) { W.missed = true; W.missReason = 'none'; return; }   // no finger, no racket
+    // swinging lets you stretch for a wide ball (an extra ~15 cm), standing still does not
+    const swinging = sw.fwd > 0.7 || sw.back > 1.1;
+    const cov = this.coverage(h, ball.p.x, W.v, swinging ? 0.15 : 0);
     if (cov.zone === 'out') { W.missed = true; W.missReason = 'far'; return; }
-    const sw = this.hooks.swingState(h.team);      // { fwd, back, lat } in screen-heights per second
     const p = { side: 0 };
     if (sw.back > 1.1 && sw.back > sw.fwd) { p.kind = 'push'; p.power = 0.3; }
     else if (sw.fwd < 0.7) { p.kind = 'block'; p.power = 0.15; }
     else { p.kind = 'drive'; p.power = clamp((sw.fwd - 0.7) / 2.6, 0, 1); }
     if (W.high && p.kind === 'drive' && p.power > 0.45) p.kind = 'smash';
     // aim: the swing's sideways motion for strokes, the racket angle (contact offset) for blocks
-    const off = clamp(((W.cov ? W.C.x : ball.p.x) - (W.cov ? W.racketAtLock ?? this.racketX(h) : this.racketX(h))) / cov.R, -1, 1);
-    if (p.kind === 'block') p.lateral = clamp(off * h.rs.x * 0.8 + sw.lat * 0.4, -1, 1);
-    else p.lateral = clamp(sw.lat / Math.max(0.8, sw.fwd + sw.back) / 0.45, -1, 1);
+    const off = clamp((ball.p.x - this.racketX(h)) / cov.R, -1, 1);
+    // direction comes from the player's stroke, including mistakes (beyond ±1.2 it misses the table)
+    if (p.kind === 'block') p.lateral = clamp(off * h.rs.x * 0.9 + sw.lat * 0.5, -1.7, 1.7);
+    else p.lateral = clamp(sw.lat / Math.max(0.8, sw.fwd + sw.back) / 0.4, -1.7, 1.7);
     const sweet = cov.zone === 'sweet';
     const q = sweet ? 1 : 0.6;                                       // a clean contact grips the ball
     if (p.kind === 'drive' && sw.wind && p.power > 0.15) p.kind = 'loop';
@@ -302,21 +318,30 @@ export class Match {
     if (!sweet && p.kind === 'block' && top > 120) pitch += THREE.MathUtils.degToRad(0.9 * Math.min(2, top / 300));
     const inSide = W.spin.y * -h.side;                               // incoming sidespin, signed in world x
     if (!sweet && Math.abs(inSide) > 50) yaw += THREE.MathUtils.degToRad(2.5 * Math.min(2, Math.abs(inSide) / 150) * (p.kind === 'block' ? 1.4 : 1));
-    p.dev = { xSign: Math.sign(off) || 1, yaw, pitch };
+    // a late stroke meets the ball behind the body: it leaves wide toward the racket side and lower
+    if (late > 0.01) { const lk = Math.min(1, late / LATE_WINDOW); yaw += THREE.MathUtils.degToRad(9 * lk); pitch -= THREE.MathUtils.degToRad(2 * lk); }
+    p.dev = { xSign: late > 0.01 ? h.rs.x : Math.sign(off) || 1, yaw, pitch };
     if (p.kind === 'block') p.depth = 0.75 + 0.2 * Math.random();
     this.rally.lastHuman = { lateral: p.lateral, perfect: sweet };
     // swing the racket through the real contact point
     const C = ball.p.clone();
     const rel = (C.x - h.pos.x) * h.rs.x;
     const type = p.kind === 'push' || p.kind === 'smash' ? p.kind : p.kind === 'block' ? 'push' : rel < -0.05 ? 'bh' : 'fh';
-    // keep the swing already timed to this ball; only switch stroke shape when needed
-    if (!h.swing || h.swing.type !== type) h.planSwing(type, C, this.now, h.fwd.clone(), this.now - 0.4, rel < -0.05);
+    // the stroke starts now, from the player's gesture; a short lunge brings the blade onto the ball
+    h.planSwing(type, C, this.now, h.fwd.clone(), this.now - 0.1, rel < -0.05);
+    h.swing.lunge = true;
+    const st = h.swing.stance, jump = Math.min(1, 0.32 / Math.max(0.001, Math.hypot(st.x - h.pos.x, st.z - h.pos.z)));
+    h.pos.x += (st.x - h.pos.x) * 0.6 * jump; h.pos.z += (st.z - h.pos.z) * 0.6 * jump;
     this.holdLateral(h);
     const shot = this.buildShot(h, C, p);
     this.launch(h, shot, { crit: p.crit, perfect: sweet, kind: p.kind, zone: cov.zone, charged, side: p.side });
   }
 
-  holdLateral(h) { h.goal.x = h.ctrlX != null ? h.ctrlX - RACKET_OFFSET * h.rs.x : h.pos.x; }
+  // the player only moves where the finger says; depth stays on a fixed ready line
+  holdLateral(h) {
+    h.goal.x = h.ctrlX != null ? h.ctrlX - RACKET_OFFSET * h.rs.x : h.pos.x;
+    h.goal.z = h.side * BASE_DEPTH;
+  }
 
   pointTo(team, reason) {
     if (this.state !== 'rally' && this.state !== 'toss') return;
@@ -409,15 +434,16 @@ export class Match {
         }
       } else if (this.window) {
         const W = this.window;
-        if (!W.cov && this.now >= W.tIdeal - 0.15) {
-          W.cov = this.coverage(W.hitter, W.C.x, W.v);
-          W.racketAtLock = this.racketX(W.hitter);
-          if (W.cov.zone !== 'out' && W.hitter.swing) W.hitter.swing.lunge = true;
+        if (!W.missed && this.now >= W.tIdeal) {
+          const sw = this.hooks.swingState(W.hitter.team);
+          const late = this.now - W.tIdeal;
+          const stroke = sw.fwd > 0.7 || sw.back > 1.1;
+          // a held racket blocks right away; only a stroke may come a little late (not after the ball drops)
+          const dropping = ball.p.y < T.top + 0.1;
+          if (stroke || late >= LATE_WINDOW || !sw.touching || dropping || (late >= 0.03 && sw.fwd < 0.3)) this.resolveHuman(W, sw, stroke ? late : 0);
         }
-        if (!W.missed && this.now >= W.tIdeal) this.resolveHuman(W);
         if (W.missed && this.window === W) {
           this.hooks.onMissWindow(W, W.missReason);
-          W.hitter.goal.z = W.hitter.side * (T.halfL + 0.75);
           this.window = null; this.pending = null;
         }
       }

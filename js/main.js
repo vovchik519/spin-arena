@@ -27,7 +27,7 @@ const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.32, 0.5, 0.95);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
-const GAME_SPEED = 0.85;
+const GAME_SPEED = 0.8;
 let models = null;
 let cfg = loadCfg();
 let match = null, demo = true, paused = false;
@@ -58,8 +58,9 @@ function hooks() {
     swingState,
     onWindow(W) {
       if (demo || tutorial <= 0) return;
-      showHint(W.hitter.team, tutorial >= 3 ? 'Палец — это ракетка. Поставьте её под мяч: совместите кольца на полу'
-        : tutorial === 2 ? 'Когда мяч подлетает, резко двиньте палец вперёд — сильный удар' : 'Серединой ракетки — точно и с зарядом. Краем — мяч уводит');
+      showHint(W.hitter.team, tutorial >= 3 ? 'Держите палец на экране — это ракетка. Совместите кольца на полу'
+        : tutorial === 2 ? 'Когда мяч подлетает, резко двиньте палец вперёд. Палец на месте — блок'
+        : 'Куда двинете палец, туда и полетит мяч. Слишком сильно и плоско — аут');
     },
     onSwing(W, p, tag) {
       if (demo) return;
@@ -71,7 +72,7 @@ function hooks() {
     },
     onMissWindow(W, reason) {
       if (demo) return;
-      feedback(W.hitter.team, reason === 'far' ? 'Мимо ракетки' : 'Не ударили', 'miss');
+      feedback(W.hitter.team, reason === 'far' ? 'Мимо ракетки' : 'Нет удара — держите палец на экране', 'miss');
     },
     onTelegraph(pt, team) { if (!demo) fx.showTele(pt, TEAM_STYLE[team].color); },
     onHit(hitter, shot, q, p) {
@@ -100,7 +101,7 @@ function hooks() {
       else if (q.auto && !demo) feedback(hitter.team, 'Автоблок · свайпните сами', 'miss');
       else if (q.kind === 'smash') { shake = 0.025; fx.ring(p, col, 0.6, 0.3); }
       if (!demo) { showHint(null); if (hitter.human && tutorial > 0) tutorial--; }
-      if (!demo && hitter.human && q.kind === 'block' && !q.perfect) feedback(hitter.team, 'Блок', 'miss');
+      if (!demo && hitter.human && q.kind === 'block') feedback(hitter.team, 'Блок', q.perfect ? 'good' : 'miss');
       if (!demo && q.charged && q.crit) banner('СУПЕРУДАР!', 'crit', `${Math.round(speed * 3.6)} км/ч`);
       updateRally();
     },
@@ -274,7 +275,8 @@ const humanPlayer = team => match && !demo ? match.players[team] : null;
 // Finger motion over the last ~140 ms, in screen-heights per second.
 function swingState(team) {
   const tr = trails[team], now = performance.now();
-  const out = { fwd: 0, back: 0, lat: 0, curve: 0, wind: false };
+  // touching: the finger is on the screen (or left it a moment ago) — you are holding the racket
+  const out = { fwd: 0, back: 0, lat: 0, curve: 0, wind: false, touching: isDown(team) || now - lifted[team] < 160 };
   if (!tr.length || now - lifted[team] > 160 && !isDown(team)) return out;
   const B = teamBasis(team), norm = Math.min(innerWidth, innerHeight);
   const at = dt => { const t = now - dt; let best = tr[0]; for (const p of tr) if (p.t <= t) best = p; return best; };
