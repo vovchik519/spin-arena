@@ -251,7 +251,7 @@ export class Athlete {
   readyFrame(axis, normal, hand) {
     axis.copy(UP).multiplyScalar(0.7).addScaledVector(this.fwd, 0.5).addScaledVector(this.rs, 0.25).normalize();
     normal.copy(this.fwd).addScaledVector(axis, -this.fwd.dot(axis)).normalize();
-    hand.copy(this.pos).setY(this.pelvisY + 0.12).addScaledVector(this.fwd, 0.36).addScaledVector(this.rs, 0.14);
+    hand.copy(this.pos).setY(this.pelvisY + 0.0).addScaledVector(this.fwd, 0.34).addScaledVector(this.rs, 0.24);
   }
 
   // ---------------------------------------------------------------- per frame
@@ -261,7 +261,7 @@ export class Athlete {
     const d = v1.subVectors(this.goal, this.pos); d.y = 0;
     const want = v2.copy(d).multiplyScalar(7);
     if (want.length() > this.maxSpeed) want.setLength(this.maxSpeed);
-    const dv = v3.subVectors(want, this.vel); const acc = 30 * dt;
+    const dv = v3.subVectors(want, this.vel); const acc = (this.accel || 30) * dt;
     if (dv.length() > acc) dv.setLength(acc);
     this.vel.add(dv); this.pos.addScaledVector(this.vel, dt);
     if (!Number.isFinite(this.pos.x) || !Number.isFinite(this.pos.z)) { this.pos.set(0, 0, this.side * 2.1); this.vel.set(0, 0, 0); this.goal.copy(this.pos); }
@@ -302,15 +302,20 @@ export class Athlete {
       }
     }
     let freeTarget = null;
-    if (this.pose === 'celebrate' || this.pose === 'win') {
+    if (this.pose === 'celebrate') {
+      // short, low fist-pump with the racket hand, then straight back to ready
+      const tt = now - this.poseT;
+      const k = tt < 0.18 ? ease(tt / 0.18) : 1 - ease((tt - 0.45) / 0.35);
+      blade.lerp(v1.copy(this.pos).setY(1.22).addScaledVector(this.rs, 0.18).addScaledVector(this.fwd, 0.22), Math.max(0, k) * 0.85);
+    } else if (this.pose === 'win') {
       const k = ease((now - this.poseT) / 0.3);
       const pump = this.pose === 'win' ? 0.12 * Math.sin((now - this.poseT) * 8) : 0;
       blade.lerp(v1.copy(this.pos).setY(1.95 + pump).addScaledVector(this.rs, 0.3).addScaledVector(this.fwd, 0.05), k);
       q.slerp(this._q2.setFromRotationMatrix(m4.makeBasis(v3.crossVectors(UP, this.fwd), UP, this.fwd)), k);
       if (this.pose === 'win') freeTarget = this._s[4].copy(this.pos).setY(1.85 - pump).addScaledVector(this.rs, -0.3).addScaledVector(this.fwd, 0.05);
     } else if (this.pose === 'sad') {
-      const k = ease((now - this.poseT) / 0.4);
-      blade.lerp(v1.copy(this.pos).setY(0.78).addScaledVector(this.rs, 0.28).addScaledVector(this.fwd, 0.1), k);
+      const k = ease((now - this.poseT) / 0.4) * (this.sadFull ? 1 : 0.5);
+      blade.lerp(v1.copy(this.pos).setY(0.82).addScaledVector(this.rs, 0.28).addScaledVector(this.fwd, 0.12), k);
     }
     this.racket.quaternion.copy(q);
     axis.set(0, 1, 0).applyQuaternion(q); normal.set(0, 0, 1).applyQuaternion(q);
@@ -328,7 +333,7 @@ export class Athlete {
     b.Hips.position.copy(b.Hips.parent.worldToLocal(hipT.clone()));
     b.Hips.updateMatrixWorld(true);
     setWorldQ(b.Hips, q1.setFromAxisAngle(UP, twist * 0.3).multiply(b.Hips.getWorldQuaternion(q2)));
-    const sadLean = this.pose === 'sad' ? 0.3 : 0;
+    const sadLean = this.pose === 'sad' ? (this.sadFull ? 0.3 : 0.08) : 0;
     this.lean = THREE.MathUtils.damp(this.lean, 0.3 + clamp(this._reach * 1.6, 0, 0.5) + sadLean, 10, dt);
     const leanAxis = v1.copy(this.right).negate();
     const side = clamp(-this.vel.dot(this.right) * 0.025, -0.08, 0.08);
@@ -343,7 +348,7 @@ export class Athlete {
     const curF = v2.copy(this.headFwdLocal).applyQuaternion(hq);
     const hpos = b.Head.getWorldPosition(v3);
     let want2;
-    if (this.pose === 'sad') want2 = v4.copy(this.fwd).multiplyScalar(0.5).add(UP.clone().multiplyScalar(-0.85)).normalize();
+    if (this.pose === 'sad' && this.sadFull) want2 = v4.copy(this.fwd).multiplyScalar(0.5).add(UP.clone().multiplyScalar(-0.85)).normalize();
     else { want2 = v4.subVectors(this.look, hpos).normalize(); if (want2.dot(this.fwd) < 0.1) want2.copy(this.fwd); }
     q1.setFromUnitVectors(curF, want2); q1.slerp(q3.identity(), 0.25);
     setWorldQ(b.Head, q1.multiply(hq));
@@ -367,9 +372,9 @@ export class Athlete {
 
     // free arm
     if (!freeTarget) {
-      freeTarget = this._s[4].copy(this.pos).setY(this.pelvisY + 0.15).addScaledVector(this.fwd, 0.3).addScaledVector(this.rs, -0.28 - twist * 0.15);
+      freeTarget = this._s[4].copy(this.pos).setY(this.pelvisY - 0.02).addScaledVector(this.fwd, 0.3).addScaledVector(this.rs, -0.28 - twist * 0.15);
       if (this.hold) freeTarget.copy(this.pos).setY(1.0).addScaledVector(this.fwd, 0.36).addScaledVector(this.rs, -0.05);
-      if (this.tossT >= 0) { const k = clamp((now - this.tossT) / 0.25, 0, 1); freeTarget.y += Math.sin(k * Math.PI * 0.5) * 0.45; }
+      if (this.tossT >= 0) { const tt = now - this.tossT, k = clamp(tt / 0.25, 0, 1); freeTarget.y += Math.sin(k * Math.PI * 0.5) * 0.45 * (1 - clamp((tt - 0.5) / 0.3, 0, 1)); }
     }
     const sL = b.LeftArm.getWorldPosition(this._s[6]);
     const poleL = v2.copy(this.rs).multiplyScalar(-0.5).addScaledVector(UP, -1).addScaledVector(this.fwd, -0.2);
@@ -458,6 +463,6 @@ export class Athlete {
     bone.updateMatrixWorld(true);
   }
 
-  setPose(p, now) { this.pose = p; this.poseT = now; if (p !== 'ready') this.swing = null; }
+  setPose(p, now, full = false) { this.pose = p; this.poseT = now; this.sadFull = p === 'sad' && full; if (p !== 'ready') this.swing = null; }
   setColorBoost(v) { for (const m of this.mats) if (m.emissiveIntensity !== undefined) m.emissiveIntensity = (this.robot ? 0.12 : 0) + v * 0.6; }
 }

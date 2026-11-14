@@ -81,7 +81,11 @@ export class FX {
     // where the incoming ball will be met: a floor ring on the hitting line, coloured by reach
     const rr = new THREE.Mesh(new THREE.RingGeometry(0.15, 0.21, 40),
       new THREE.MeshBasicMaterial({ color: 0x7dffb4, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending }));
-    rr.rotation.x = -Math.PI / 2; rr.visible = false; scene.add(rr); this.reachRing = rr;
+    rr.rotation.x = -Math.PI / 2; rr.visible = false; scene.add(rr); this.reachRing = rr; this.reachR = 0.34;
+    // the ball's arrival spot on the same line
+    const sp = new THREE.Mesh(new THREE.CircleGeometry(0.05, 24),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending }));
+    sp.rotation.x = -Math.PI / 2; sp.visible = false; scene.add(sp); this.spot = sp;
     // opponent's telegraphed target on your half
     const tm = new THREE.Mesh(new THREE.RingGeometry(0.06, 0.1, 32),
       new THREE.MeshBasicMaterial({ color: 0xc9a2ff, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending }));
@@ -139,8 +143,10 @@ export class FX {
     r.billboard = !flatOnTable && !faceDir;
   }
 
-  showReach(p, color) {
+  showSpot(p) { this.spot.visible = !!p; if (p) this.spot.position.set(p.x, 0.008, p.z); }
+  showReach(p, color, R) {
     this.reachRing.visible = !!p;
+    if (R) this.reachR = R;
     if (p) { this.reachRing.position.set(p.x, 0.006, p.z); this.reachRing.material.color.set(color); }
   }
   showTele(p, color) {
@@ -191,7 +197,7 @@ export class FX {
     }
     this.ballMat.emissive.setRGB(heat * 0.3, heat * 0.8, heat * 1.0);
     this.marker.scale.setScalar(1 + Math.sin(time * 8) * 0.12);
-    this.reachRing.scale.setScalar(1 + Math.sin(time * 10) * 0.06);
+    this.reachRing.scale.setScalar(this.reachR / 0.21 * (1 + Math.sin(time * 10) * 0.03));
     if (this.teleLife > 0) {
       this.teleLife -= dt;
       const k = Math.max(0, this.teleLife / 1.1);

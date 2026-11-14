@@ -116,6 +116,17 @@ body:not(.ingame) #pauseBtn, body:not(.ingame) #hud { display: none; }
 #loading { position: fixed; inset: 0; z-index: 9; display: grid; place-items: center; align-content: center; gap: 14px; background: var(--ink); font-family: var(--display); font-weight: 800; letter-spacing: .1em; color: var(--cyan); text-align: center; padding-inline: 16px; }
 #loading::after { content: ""; width: 160px; height: 3px; border-radius: 3px; background: linear-gradient(90deg, transparent, var(--cyan), var(--violet), transparent); background-size: 200% 100%; animation: sheen 1s linear infinite; }
 .cta:disabled { opacity: .5; }
+.pips { display: flex; gap: 3px; }
+.pips i { width: 7px; height: 7px; border-radius: 50%; border: 1px solid rgba(143,220,255,.45); }
+.pips[data-n="1"] i:nth-child(-n+1), .pips[data-n="2"] i:nth-child(-n+2), .pips[data-n="3"] i { background: var(--cyan); border-color: var(--cyan); }
+.t1 .pips[data-n="1"] i:nth-child(-n+1), .t1 .pips[data-n="2"] i:nth-child(-n+2), .t1 .pips[data-n="3"] i { background: var(--violet); border-color: var(--violet); }
+.pips.full i { box-shadow: 0 0 10px currentColor; animation: breathe .6s ease-in-out infinite; color: var(--cyan); }
+#rally { position: fixed; z-index: 3; left: 50%; transform: translateX(-50%); top: calc(env(safe-area-inset-top, 0px) + 62px); font-family: var(--display); font-weight: 800; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); pointer-events: none; }
+#rally b { font-size: 22px; color: var(--fg); margin-left: 4px; font-variant-numeric: tabular-nums; }
+#rally[data-heat="2"] b { color: var(--cyan); text-shadow: 0 0 14px rgba(94,240,255,.7); }
+#rally[data-heat="3"] b { color: #fff; text-shadow: 0 0 18px var(--cyan), 0 0 30px var(--violet); }
+#rally.bump b { display: inline-block; animation: pop .35s cubic-bezier(.2,1.6,.4,1); }
+@media (max-width: 560px) { #rally { top: calc(env(safe-area-inset-top, 0px) + 112px); } }
 #zones { position: fixed; inset: 0; z-index: 1; pointer-events: none; display: none; }
 body.duo.ingame #zones { display: grid; grid-template-rows: 1fr 1fr; }
 .zone { position: relative; }
@@ -139,10 +150,11 @@ body.duo.ingame #zones { display: grid; grid-template-rows: 1fr 1fr; }
 <div id="flash"></div>
 
 <div id="hud" hidden>
-  <div class="team t0"><span class="srv" id="s0"></span><div class="who"><b id="n0">Вы</b><small id="c0"></small></div><span class="gms" id="g0">0</span><span class="pts" id="p0">0</span></div>
-  <div class="team t1"><span class="srv" id="s1"></span><div class="who"><b id="n1">Компьютер</b><small id="c1"></small></div><span class="gms" id="g1">0</span><span class="pts" id="p1">0</span></div>
+  <div class="team t0"><span class="srv" id="s0"></span><div class="who"><b id="n0">Вы</b><small id="c0"></small></div><span class="pips" id="q0" hidden title="Заряд суперудара"><i></i><i></i><i></i></span><span class="gms" id="g0">0</span><span class="pts" id="p0">0</span></div>
+  <div class="team t1"><span class="srv" id="s1"></span><div class="who"><b id="n1">Компьютер</b><small id="c1"></small></div><span class="pips" id="q1" hidden title="Заряд суперудара"><i></i><i></i><i></i></span><span class="gms" id="g1">0</span><span class="pts" id="p1">0</span></div>
 </div>
 <button id="pauseBtn" aria-label="Пауза"></button>
+<div id="rally" hidden>Розыгрыш <b>0</b></div>
 <div id="banner"><span class="bt"></span><span class="bs"></span></div>
 <div id="zones" aria-hidden="true"><div class="zone z0"><span>Игрок 1</span></div><div class="zone z1"><span>Игрок 2</span></div></div>
 <div class="hint" id="hint0" hidden></div>
@@ -168,14 +180,14 @@ body.duo.ingame #zones { display: grid; grid-template-rows: 1fr 1fr; }
   <div class="card">
     <h2 class="logo" style="font-size:30px">Как играть</h2>
     <ul class="how">
-      <li><svg class="gest" viewBox="0 0 54 54"><path d="M12 36h30M12 36l5-5M12 36l5 5M42 36l-5-5M42 36l-5 5" stroke="#5ef0ff" stroke-width="3" fill="none" stroke-linecap="round"/><circle cx="27" cy="20" r="5" fill="#5ef0ff"/></svg><div><b>Палец на экране — это вы.</b> <span>Ведите им влево и вправо, игрок бежит следом. Встаньте так, чтобы кольцо на полу стало зелёным: значит, мяч в зоне удара.</span></div></li>
-      <li><svg class="gest" viewBox="0 0 54 54"><path d="M27 42V14m0 0-8 8m8-8 8 8" stroke="#5ef0ff" stroke-width="3" fill="none" stroke-linecap="round"/></svg><div><b>Резкий свайп к сопернику — удар.</b> <span>Удар происходит в момент, когда вы отпускаете палец. Длина и скорость — сила, наклон — направление, дуга — боковое вращение.</span></div></li>
-      <li><svg class="gest" viewBox="0 0 54 54"><circle cx="27" cy="27" r="18" stroke="#fff" stroke-width="2" fill="none"/><circle cx="27" cy="27" r="5" fill="#7dffb4"/></svg><div><b>Тайминг.</b> <span>Кольцо сжимается к мячу. Зелёное — идеально, сильный идеальный удар даёт КРИТ. Рано — мяч уходит по диагонали и длиннее, поздно — в сетку или в сторону. Чем сильнее бьёте, тем точнее нужно попасть.</span></div></li>
-      <li><svg class="gest" viewBox="0 0 54 54"><path d="M27 14v28m0 0-8-8m8 8 8-8" stroke="#c9a2ff" stroke-width="3" fill="none" stroke-linecap="round"/></svg><div><b>Свайп к себе — подрезка.</b> <span>Короткий мяч с нижним вращением. Плоский удар против подрезки тянет в сетку, отвечайте подрезкой или идеальным таймингом.</span></div></li>
-      <li><svg class="gest" viewBox="0 0 54 54"><circle cx="27" cy="27" r="9" stroke="#c9a2ff" stroke-width="3" fill="none"/></svg><div><b>Фиолетовое кольцо на столе</b> <span>показывает, куда сейчас ударит соперник. Успейте перейти.</span></div></li>
-      <li><svg class="gest" viewBox="0 0 54 54"><rect x="12" y="8" width="30" height="38" rx="5" stroke="#8fa3cc" stroke-width="2" fill="none"/><path d="M12 27h30" stroke="#8fa3cc" stroke-dasharray="3 3"/></svg><div><b>Вдвоём на одном телефоне.</b> <span>Нижняя половина экрана — Игрок 1, верхняя — Игрок 2. У каждого свой палец, можно одновременно.</span></div></li>
+      <li><svg class="gest" viewBox="0 0 54 54"><circle cx="27" cy="27" r="14" stroke="#8ff6ff" stroke-width="3" fill="none"/><circle cx="27" cy="27" r="4" fill="#fff"/></svg><div><b>Палец — это ракетка.</b> <span>Ведите им влево и вправо: голубое кольцо на полу — ваша ракетка, белая точка — куда прилетит мяч. Совместите их, и мяч отобьётся.</span></div></li>
+      <li><svg class="gest" viewBox="0 0 54 54"><path d="M27 42V14m0 0-8 8m8-8 8 8" stroke="#5ef0ff" stroke-width="3" fill="none" stroke-linecap="round"/></svg><div><b>Резко двиньте палец вперёд в момент удара</b> <span>— получится сильный удар. Чем быстрее движение, тем мощнее. Движение вбок — направление. Палец стоит — мягкий блок.</span></div></li>
+      <li><svg class="gest" viewBox="0 0 54 54"><path d="M27 14v28m0 0-8-8m8 8 8-8" stroke="#c9a2ff" stroke-width="3" fill="none" stroke-linecap="round"/></svg><div><b>Резко назад — подрезка.</b> <span>Низкий мяч с нижним вращением. Против подрезки сильный удар краем ракетки уходит в сетку.</span></div></li>
+      <li><svg class="gest" viewBox="0 0 54 54"><circle cx="27" cy="27" r="16" stroke="#7dffb4" stroke-width="3" fill="none"/><circle cx="27" cy="27" r="5" fill="#7dffb4"/></svg><div><b>Середина ракетки.</b> <span>Кольцо зелёное — мяч идёт в середину: удар точный, сильный удар становится КРИТом. Три точных удара подряд заряжают СУПЕРУДАР. Краем ракетки мяч уводит в сторону.</span></div></li>
+      <li><svg class="gest" viewBox="0 0 54 54"><circle cx="27" cy="27" r="9" stroke="#c9a2ff" stroke-width="3" fill="none"/></svg><div><b>Фиолетовое кольцо на столе</b> <span>заранее показывает, куда ударит соперник.</span></div></li>
+      <li><svg class="gest" viewBox="0 0 54 54"><rect x="12" y="8" width="30" height="38" rx="5" stroke="#8fa3cc" stroke-width="2" fill="none"/><path d="M12 27h30" stroke="#8fa3cc" stroke-dasharray="3 3"/></svg><div><b>Вдвоём на одном телефоне.</b> <span>Нижняя половина экрана — Игрок 1, верхняя — Игрок 2. Подача: резкий свайп к сопернику, тап — короткая.</span></div></li>
     </ul>
-    <p class="foot">На уровне «Новичок» игрок сам ставит слабый блок, если вы не успели ударить. На «Профи» и «Мастере» пропущенный мяч — потерянное очко.</p>
+    <p class="foot">На «Новичке» ракетка шире, на «Мастере» уже. Длинные розыгрыши заводят трибуны.</p>
     <button class="cta" id="howBack">Понятно</button>
   </div>
 </section>

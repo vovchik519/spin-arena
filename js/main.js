@@ -6,7 +6,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { createWorld, MOBILE } from './scene.js';
 import { FX, Sound } from './fx.js';
-import { Match, TEAM_STYLE, reachZone } from './match.js';
+import { Match, TEAM_STYLE, CHARGE_MAX } from './match.js';
 import { loadModels } from './athlete.js';
 import { T } from './physics.js';
 
@@ -27,6 +27,7 @@ const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.32, 0.5, 0.95);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
+const GAME_SPEED = 0.85;
 let models = null;
 let cfg = loadCfg();
 let match = null, demo = true, paused = false;
@@ -54,10 +55,11 @@ function hooks() {
       if (server.human) showHint(server.team, tutorial > 0 ? 'Подача: резкий свайп к сопернику · к себе — короткая с подрезкой' : 'Ваша подача');
       else showHint(null);
     },
+    swingState,
     onWindow(W) {
       if (demo || tutorial <= 0) return;
-      showHint(W.hitter.team, tutorial >= 3 ? 'Ведите пальцем — игрок идёт за ним. Встаньте на кольцо на полу'
-        : tutorial === 2 ? 'Резкий свайп к сопернику, когда кольцо у мяча станет зелёным' : 'Наклон свайпа — направление. Сильнее удар — точнее тайминг');
+      showHint(W.hitter.team, tutorial >= 3 ? 'Палец — это ракетка. Поставьте её под мяч: совместите кольца на полу'
+        : tutorial === 2 ? 'Когда мяч подлетает, резко двиньте палец вперёд — сильный удар' : 'Серединой ракетки — точно и с зарядом. Краем — мяч уводит');
     },
     onSwing(W, p, tag) {
       if (demo) return;
@@ -69,7 +71,7 @@ function hooks() {
     },
     onMissWindow(W, reason) {
       if (demo) return;
-      feedback(W.hitter.team, reason === 'far' ? 'Не дотянулись' : reason === 'late' ? 'Поздно' : 'Не ударили', 'miss');
+      feedback(W.hitter.team, reason === 'far' ? 'Мимо ракетки' : 'Не ударили', 'miss');
     },
     onTelegraph(pt, team) { if (!demo) fx.showTele(pt, TEAM_STYLE[team].color); },
     onHit(hitter, shot, q, p) {
@@ -89,7 +91,9 @@ function hooks() {
       else if (q.auto && !demo) feedback(hitter.team, 'Автоблок · свайпните сами', 'miss');
       else if (q.kind === 'smash') { shake = 0.025; fx.ring(p, col, 0.6, 0.3); }
       if (!demo) { showHint(null); if (hitter.human && tutorial > 0) tutorial--; }
-      if (!demo && q.zone === 'stretch') feedback(hitter.team, 'В последний момент', 'miss');
+      if (!demo && hitter.human && q.kind === 'block' && !q.perfect) feedback(hitter.team, 'Блок', 'miss');
+      if (!demo && q.charged && q.crit) banner('СУПЕРУДАР!', 'crit', `${Math.round(speed * 3.6)} км/ч`);
+      updateRally();
     },
     onBounce(ev) {
       const p = new THREE.Vector3(ev.x, T.top + 0.004, ev.z);
@@ -100,7 +104,7 @@ function hooks() {
     onNet() { if (!demo) banner('Сетка', 'miss'); },
     onLet() { if (!demo) banner('Переподача', 'info', 'мяч задел сетку'); },
     onPoint(team, reason, r) {
-      updateHud(team); showHint(null); fx.showMarker(null);
+      updateHud(team); lastRally = 0; if ($('rally')) $('rally').hidden = true; showHint(null); fx.showMarker(null);
       fx.trailHeat *= 0.5;
       world.crowd.cheer(r.gameOver ? 1 : 0.55); snd.crowd(r.gameOver ? 1.4 : 0.7);
       if (demo || r.matchOver) return;
@@ -220,21 +224,21 @@ function updateCamera(dt) {
 }
 
 // ------------------------------------------------------------ input
-// Hold a thumb in your half: the player follows it left/right. A quick flick toward the
-// opponent is a stroke (the release is the hit); a quick flick toward yourself is a push.
+// The finger is the racket: its left/right position places the racket (the player runs to
+// keep up), and how it is moving when the ball arrives decides the stroke.
 const swipeCv = $('swipe'), sctx = swipeCv.getContext('2d');
 const touches = new Map(), fading = [];
+const trails = [[], []], lifted = [0, 0];
 const toScreen = v => { const p = v.clone().project(camera); return new THREE.Vector2((p.x + 1) / 2 * innerWidth, (1 - p.y) / 2 * innerHeight); };
 function teamBasis(team) {
   const own = new THREE.Vector3(0, T.top, team === 0 ? T.halfL : -T.halfL);
   const opp = new THREE.Vector3(0, T.top, -own.z);
   const a = toScreen(own), b = toScreen(opp);
   const f = b.clone().sub(a).normalize();
-  // the court's x axis on screen, measured along the player's hitting line
   const line = (team === 0 ? 1 : -1) * (T.halfL + 0.6);
   const xa = toScreen(new THREE.Vector3(-1, 0.9, line)), xb = toScreen(new THREE.Vector3(1, 0.9, line));
   const xs = xb.clone().sub(xa).normalize();
-  const r = team === 0 ? xs.clone() : xs.clone().negate();   // the player's own right on screen
+  const r = team === 0 ? xs.clone() : xs.clone().negate();
   return { f, r, xs };
 }
 function duo() { return cfg.opp === 'friend' && !demo; }
@@ -242,22 +246,44 @@ function teamForPoint(x, y) {
   if (!duo()) return 0;
   const portrait = innerWidth < innerHeight;
   const u = portrait ? y / innerHeight : x / innerWidth;
-  if (Math.abs(u - 0.5) < 0.04) return -1;                       // dead zone on the centre line
+  if (Math.abs(u - 0.5) < 0.04) return -1;
   return portrait ? (u > 0.5 ? 0 : 1) : (u < 0.5 ? 0 : 1);
 }
-// absolute mapping: the whole width of your half spans 2.5 m of court
-function thumbToCourtX(team, x, y) {
+// absolute mapping: the width of your half spans the court from -1.3 m to +1.3 m
+function fingerToCourtX(team, x, y) {
   const B = teamBasis(team);
   if (!Number.isFinite(B.xs.x) || B.xs.lengthSq() < 0.5) return null;
   const horiz = Math.abs(B.xs.x) >= Math.abs(B.xs.y);
   const half = horiz ? innerWidth / 2 : innerHeight / 2;
   const u = horiz ? (x - innerWidth / 2) * Math.sign(B.xs.x) : (y - innerHeight / 2) * Math.sign(B.xs.y);
-  return clamp(u / (half * 0.85), -1, 1) * 1.25;
+  return clamp(u / (half * 0.85), -1, 1) * 1.3;
 }
 const humanPlayer = team => match && !demo ? match.players[team] : null;
 
+// Finger motion over the last ~140 ms, in screen-heights per second.
+function swingState(team) {
+  const tr = trails[team], now = performance.now();
+  const out = { fwd: 0, back: 0, lat: 0, curve: 0 };
+  if (!tr.length || now - lifted[team] > 160 && !isDown(team)) return out;
+  const B = teamBasis(team), norm = Math.min(innerWidth, innerHeight);
+  const at = dt => { const t = now - dt; let best = tr[0]; for (const p of tr) if (p.t <= t) best = p; return best; };
+  const p2 = tr[tr.length - 1];
+  if (now - p2.t > 90) return out;               // finger resting: a block
+  const p1 = at(70), p0 = at(140);
+  const seg = (a, b) => {
+    const dt = Math.max(0.016, (b.t - a.t) / 1000);
+    const dx = b.x - a.x, dy = b.y - a.y;
+    return { f: (dx * B.f.x + dy * B.f.y) / dt / norm, l: (dx * B.r.x + dy * B.r.y) / dt / norm };
+  };
+  const s1 = seg(p0, p1), s2 = seg(p1, p2);
+  const fast = s2.f >= s1.f ? s2 : s1;
+  out.fwd = Math.max(0, fast.f); out.back = Math.max(0, -Math.min(s1.f, s2.f)); out.lat = fast.l;
+  out.curve = clamp((s2.l - s1.l) * 0.25, -1, 1);
+  return out;
+}
+function isDown(team) { for (const tr of touches.values()) if (tr.team === team) return true; return false; }
+
 function flickParams(tr) {
-  // the stroke is the fast tail of the gesture (last ~180 ms)
   const pts = tr.pts, e = pts[pts.length - 1];
   let i = pts.length - 1;
   while (i > 0 && e.t - pts[i - 1].t <= 180) i--;
@@ -266,60 +292,53 @@ function flickParams(tr) {
   const vec = new THREE.Vector2(e.x - s.x, e.y - s.y);
   const len = vec.length(), norm = Math.min(innerWidth, innerHeight);
   const dur = Math.max(0.03, (e.t - s.t) / 1000);
-  const speed = len / dur;
   const f = vec.dot(B.f), l = vec.dot(B.r);
-  if (len < 28 || speed < 450) return null;                   // a slide, not a flick
-  let curv = 0;
-  const n = new THREE.Vector2(-vec.y / len, vec.x / len);
-  for (let k = i; k < pts.length; k++) { const d = (pts[k].x - s.x) * n.x + (pts[k].y - s.y) * n.y; if (Math.abs(d) > Math.abs(curv)) curv = d; }
-  curv = curv / len * (Math.sign(n.dot(B.r)) || 1);
-  const ln = len / norm;
-  if (f < -len * 0.5) return { kind: 'push', lateral: clamp(Math.atan2(l, -f) / 0.5, -1, 1), power: 0.3, side: clamp(curv * 4, -1, 1), startIdx: i };
-  if (f < len * 0.5) return null;
-  const power = clamp(0.45 * ln / 0.32 + 0.55 * (speed / norm) / 3.2, 0, 1);
-  return { kind: 'drive', lateral: clamp(Math.atan2(l, f) / 0.5, -1, 1), power, side: clamp(curv * 4, -1, 1), startIdx: i };
+  if (len < 24) return null;
+  if (f < -len * 0.5) return { kind: 'push', lateral: clamp(Math.atan2(l, -f) / 0.5, -1, 1), power: 0.3, side: 0 };
+  if (f < len * 0.4) return null;
+  return { kind: 'drive', lateral: clamp(Math.atan2(l, f) / 0.5, -1, 1), power: clamp(0.45 * (len / norm) / 0.32 + 0.55 * (len / dur / norm) / 3.2, 0, 1), side: 0 };
 }
 
+function pushSample(team, x, y, t) {
+  const tr = trails[team];
+  tr.push({ x, y, t });
+  while (tr.length > 2 && t - tr[0].t > 400) tr.shift();
+  const p = humanPlayer(team); if (!p) return;
+  const cx = fingerToCourtX(team, x, y);
+  if (cx != null && Number.isFinite(cx)) p.ctrlX = cx;
+}
 canvas.addEventListener('pointerdown', e => {
   snd.unlock();
   if (demo || paused || !match || cine) return;
   const team = teamForPoint(e.clientX, e.clientY);
-  if (team < 0) return;
-  for (const tr of touches.values()) if (tr.team === team) return;   // one thumb per player
+  if (team < 0 || isDown(team)) return;          // one finger per player
   canvas.setPointerCapture?.(e.pointerId);
   const t = performance.now();
-  const tr = { team, pts: [{ x: e.clientX, y: e.clientY, t }], ctrl: [] };
-  touches.set(e.pointerId, tr);
-  moveWithThumb(tr, e.clientX, e.clientY, t);
+  trails[team].length = 0;
+  touches.set(e.pointerId, { team, pts: [{ x: e.clientX, y: e.clientY, t }] });
+  pushSample(team, e.clientX, e.clientY, t);
 });
-function moveWithThumb(tr, x, y, t) {
-  const p = humanPlayer(tr.team); if (!p) return;
-  const cx = thumbToCourtX(tr.team, x, y);
-  tr.ctrl.push({ t, x: cx });
-  if (tr.ctrl.length > 40) tr.ctrl.shift();
-  if (Number.isFinite(cx)) p.ctrlX = cx;
-}
 canvas.addEventListener('pointermove', e => {
   const tr = touches.get(e.pointerId); if (!tr) return;
   const t = performance.now();
   tr.pts.push({ x: e.clientX, y: e.clientY, t });
   if (tr.pts.length > 80) tr.pts.splice(1, 1);
-  moveWithThumb(tr, e.clientX, e.clientY, t);
+  pushSample(tr.team, e.clientX, e.clientY, t);
 });
 const endTouch = e => {
   const tr = touches.get(e.pointerId); if (!tr) return;
   touches.delete(e.pointerId);
-  tr.pts.push({ x: e.clientX, y: e.clientY, t: performance.now() });
+  const t = performance.now();
+  tr.pts.push({ x: e.clientX, y: e.clientY, t });
+  pushSample(tr.team, e.clientX, e.clientY, t);
+  lifted[tr.team] = t;
   tr.fade = 1; fading.push(tr);
   if (!match || demo || paused) return;
-  const fp = flickParams(tr);
-  if (!fp) return;
-  // the flick's sideways motion must not drag the player: restore where the thumb was before it
-  const p = humanPlayer(tr.team), t0 = tr.pts[fp.startIdx].t;
-  const before = [...tr.ctrl].reverse().find(c => c.t <= t0);
-  if (p && before && Number.isFinite(before.x)) p.ctrlX = before.x;
-  const res = match.humanStroke(tr.team, fp);
-  if (res === null && match.window?.hitter.team === tr.team) feedback(tr.team, 'Рано', 'miss');
+  // serving: a flick toward the opponent is a long serve, a tap or pull-back is a short one
+  if (match.state === 'serve' && match.server.team === tr.team && match.server.human) {
+    const fp = flickParams(tr) || { kind: 'push', lateral: 0, power: 0.3, side: 0 };
+    match.humanStroke(tr.team, fp);
+  }
 };
 canvas.addEventListener('pointerup', endTouch);
 canvas.addEventListener('pointercancel', endTouch);
@@ -397,6 +416,25 @@ function banner(text, kind = 'info', sub = '') {
 }
 function flash() { const f = $('flash'); f.classList.remove('go'); void f.offsetWidth; f.classList.add('go'); }
 let tutorial = 3;
+let lastRally = 0;
+function updateRally() {
+  const n = match ? match.rallyHits : 0, el = $('rally');
+  if (!el) return;
+  el.hidden = demo || n < 3;
+  if (n !== lastRally && n >= 3) {
+    el.querySelector('b').textContent = n;
+    el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump');
+    el.dataset.heat = n >= 15 ? '3' : n >= 9 ? '2' : '1';
+    if (n % 5 === 0) { world.crowd.cheer(0.5 + Math.min(n, 20) / 40); snd.crowd(0.5 + Math.min(n, 20) / 30); }
+  }
+  lastRally = n;
+  for (const t of [0, 1]) {
+    const c = match ? match.charge[t] : 0, pips = $('q' + t);
+    if (!pips) continue;
+    pips.hidden = demo || !match.players[t].human;
+    pips.dataset.n = c; pips.classList.toggle('full', c >= CHARGE_MAX);
+  }
+}
 const fbTimers = [0, 0];
 // short result text: centre banner vs the computer, the player's own half when two play
 function feedback(team, text, kind) {
@@ -476,7 +514,9 @@ function frame(nowMs) {
 }
 function tick(rdt, draw = true) {
   realT += rdt;
-  if (realT > slowUntil) timeScale += (1 - timeScale) * (1 - Math.exp(-rdt * 6));
+  // the whole match runs a touch slower than real time: easier to read, still real physics
+  const base = demo ? 1 : GAME_SPEED;
+  if (realT > slowUntil) timeScale += (base - timeScale) * (1 - Math.exp(-rdt * 6));
   const dt = paused ? 0 : rdt * timeScale;
   if (match && !paused) {
     match.update(dt);
@@ -487,15 +527,17 @@ function tick(rdt, draw = true) {
     if (W && !demo && !W.missed) {
       const left = W.tIdeal - match.now, total = Math.max(0.2, W.tIdeal - W.t0);
       // ring shrinks over the ball's whole flight, so fast balls get a full countdown too
-      fx.timing.visible = !W.shot && left > -W.win.late;
+      fx.timing.visible = left > -0.02;
       fx.timing.position.copy(match.ball.p);
       fx.timing.scale.setScalar(0.06 + clamp(left / total, 0, 1) * 0.55);
       const inP = Math.abs(left) <= W.win.P, inG = Math.abs(left) <= W.win.G;
       fx.timing.material.color.set(inP ? 0x7dffb4 : inG ? 0x8ff6ff : 0xffffff);
       fx.timing.material.opacity = inG ? 1 : 0.6;
-      const h = W.hitter, zone = reachZone(h, W.C.x, W.v);
-      fx.showReach(new THREE.Vector3(W.C.x, 0, h.side * (T.halfL + 0.45)), zone === 'core' ? 0x7dffb4 : zone === 'stretch' ? 0xffffff : 0x8a93b8);
-    } else { fx.timing.visible = false; fx.showReach(null); }
+      const h = W.hitter, cov = match.coverage(h, W.C.x, W.v);
+      const lineZ = h.side * (T.halfL + 0.45);
+      fx.showReach(new THREE.Vector3(match.racketX(h), 0, lineZ), cov.zone === 'sweet' ? 0x7dffb4 : cov.zone === 'hit' ? 0x8ff6ff : 0x8a93b8, cov.R);
+      fx.showSpot(new THREE.Vector3(W.C.x, 0, lineZ));
+    } else { fx.timing.visible = false; fx.showReach(null); fx.showSpot(null); }
   }
   world.crowd.update(realT, rdt);
   fx.update(dt || rdt * 0.2, camera, realT);
