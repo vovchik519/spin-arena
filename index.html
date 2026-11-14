@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Спин Арена — настольный теннис в 3D: игра с роботом или вдвоём на одном телефоне.">
+<meta name="theme-color" content="#050913">
+<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}[hidden]{display:none!important}</style>
+<title>Спин Арена</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=Unbounded:wght@600;800;900&display=swap">
+<style>
+/* Layout: one full-bleed 3D stage; glass panels float over it; HUD hugs the top edge. */
+:root {
+  --ink: #050913;          /* arena darkness */
+  --panel: rgba(10, 18, 38, 0.72);
+  --line: rgba(143, 220, 255, 0.18);
+  --fg: #e6eeff;
+  --muted: #8fa3cc;
+  --cyan: #5ef0ff;         /* team 1 / main accent */
+  --violet: #c9a2ff;       /* team 2 */
+  --good: #7dffb4;
+  --display: "Unbounded", "Arial Black", system-ui, sans-serif;
+  --body: "Manrope", "Segoe UI", system-ui, sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { background: var(--ink); color: var(--fg); font-family: var(--body); overflow: hidden; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
+#scene, #swipe { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+#scene { touch-action: none; }
+#swipe { pointer-events: none; z-index: 2; }
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+/* ---------- HUD */
+#hud { position: fixed; z-index: 3; top: calc(env(safe-area-inset-top, 0px) + 10px); left: 50%; transform: translateX(-50%);
+  display: flex; align-items: stretch; gap: 2px; pointer-events: none; font-variant-numeric: tabular-nums; }
+.team { display: flex; align-items: center; gap: 10px; padding: 6px 12px; background: var(--panel); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid var(--line); min-width: 0; }
+.team.t0 { border-radius: 14px 4px 4px 14px; flex-direction: row; }
+.team.t1 { border-radius: 4px 14px 14px 4px; flex-direction: row-reverse; text-align: right; }
+.who { display: grid; line-height: 1.1; min-width: 0; }
+.who b { font-family: var(--display); font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+.who small { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30vw; }
+.t0 .who b { color: var(--cyan); } .t1 .who b { color: var(--violet); }
+.pts { font-family: var(--display); font-weight: 900; font-size: 28px; min-width: 1.3em; text-align: center; }
+.gms { font-family: var(--display); font-weight: 600; font-size: 13px; color: var(--muted); padding: 2px 6px; border: 1px solid var(--line); border-radius: 6px; }
+.srv { width: 9px; height: 9px; border-radius: 50%; background: #fff; box-shadow: 0 0 10px #fff; }
+.pop { animation: pop .5s cubic-bezier(.2,1.6,.4,1); }
+@keyframes pop { from { transform: scale(1.7); color: #fff; text-shadow: 0 0 24px var(--cyan); } }
+#pauseBtn { position: fixed; z-index: 4; top: calc(env(safe-area-inset-top, 0px) + 12px); left: max(14px, env(safe-area-inset-left, 0px)); width: 40px; height: 40px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); display: grid; place-items: center; }
+#pauseBtn::before { content: ""; width: 12px; height: 14px; border-inline: 4px solid var(--fg); box-sizing: border-box; }
+body:not(.ingame) #pauseBtn, body:not(.ingame) #hud { display: none; }
+
+/* ---------- banners & hints */
+#banner { position: fixed; z-index: 3; left: 0; right: 0; top: 34%; text-align: center; pointer-events: none; opacity: 0; }
+#banner .bt { font-family: var(--display); font-weight: 900; font-size: clamp(28px, 8vw, 64px); letter-spacing: .02em; display: block; }
+#banner .bs { font-size: 14px; font-weight: 700; color: var(--muted); letter-spacing: .12em; text-transform: uppercase; }
+#banner.show { animation: bannerIn 1.1s ease forwards; }
+#banner.crit.show { animation-duration: 1.5s; }
+#banner.crit .bt { font-size: clamp(44px, 14vw, 120px); background: linear-gradient(100deg, #fff 0%, var(--cyan) 35%, var(--violet) 70%, #fff 100%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 0 22px rgba(94,240,255,.7)); animation: sheen 1.2s linear infinite; font-style: italic; }
+#banner.crit .bs { color: var(--cyan); font-size: 18px; }
+#banner.good .bt { color: var(--good); text-shadow: 0 0 20px rgba(125,255,180,.6); font-size: clamp(24px, 6vw, 44px); }
+#banner.miss .bt { color: var(--muted); font-size: clamp(22px, 5vw, 36px); }
+#banner.big .bt { color: #fff; text-shadow: 0 0 30px var(--cyan); }
+@keyframes bannerIn { 0% { opacity: 0; transform: scale(1.6) skewX(-8deg); } 12% { opacity: 1; transform: scale(1) skewX(0); } 80% { opacity: 1; } 100% { opacity: 0; transform: translateY(-14px); } }
+@keyframes sheen { to { background-position: -200% 0; } }
+#flash { position: fixed; inset: 0; z-index: 2; pointer-events: none; opacity: 0; background: radial-gradient(circle at 50% 45%, rgba(94,240,255,.35), rgba(110,70,255,.18) 40%, transparent 70%); }
+#flash.go { animation: fl .6s ease-out; }
+@keyframes fl { 0% { opacity: 1; } 100% { opacity: 0; } }
+.hint { position: fixed; z-index: 3; left: 50%; transform: translateX(-50%); padding: 8px 14px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); font-size: 13px; font-weight: 700; white-space: nowrap; pointer-events: none; animation: breathe 1.6s ease-in-out infinite; max-width: calc(100vw - 32px); overflow: hidden; text-overflow: ellipsis; }
+#hint0 { bottom: calc(env(safe-area-inset-bottom, 0px) + 22px); color: var(--cyan); }
+#hint1 { top: calc(env(safe-area-inset-top, 0px) + 112px); color: var(--violet); }
+@media (orientation: portrait) { #hint1 { transform: translateX(-50%) rotate(180deg); } }
+@keyframes breathe { 50% { opacity: .55; } }
+
+/* ---------- screens */
+.screen { position: fixed; inset: 0; z-index: 5; display: flex; align-items: flex-end; justify-content: flex-start;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: calc(env(safe-area-inset-top, 0px) + 16px) calc(env(safe-area-inset-bottom, 0px) + 16px);
+  background: linear-gradient(180deg, transparent 30%, rgba(5,9,19,.75)); overflow-y: auto; }
+.card { width: min(440px, 100%); background: var(--panel); backdrop-filter: blur(16px) saturate(1.2); -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  border: 1px solid var(--line); border-radius: 22px; padding: 22px; display: grid; gap: 16px; margin-top: auto; animation: rise .6s cubic-bezier(.2,.9,.2,1); }
+@media (min-width: 900px) { .screen { align-items: center; padding-left: max(6vw, env(safe-area-inset-left, 0px)); } .card { margin-top: 0; } }
+@keyframes rise { from { opacity: 0; transform: translateY(24px); } }
+.screen .card { background: rgba(8, 14, 32, 0.86); }
+@media (max-width: 560px) {
+  #hud { top: calc(env(safe-area-inset-top, 0px) + 60px); }
+  .who small { display: none; }
+  .team { padding: 5px 10px; gap: 8px; }
+  .pts { font-size: 24px; }
+  .card { padding: 18px; gap: 13px; }
+  .tag { font-size: 13px; }
+}
+.logo { font-family: var(--display); font-weight: 900; font-size: clamp(34px, 9vw, 52px); line-height: .92; letter-spacing: -.01em; text-wrap: balance; margin: 0; }
+.logo span { display: block; color: transparent; -webkit-text-stroke: 1.5px var(--cyan); font-style: italic; }
+.tag { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.row { display: grid; gap: 6px; }
+.row > label { font-size: 11px; font-weight: 800; color: var(--muted); letter-spacing: .14em; text-transform: uppercase; }
+.seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; padding: 4px; border-radius: 14px; background: rgba(0,0,0,.3); border: 1px solid var(--line); }
+.seg button { border: 0; background: transparent; padding: 10px 6px; border-radius: 10px; font-weight: 700; font-size: 13px; color: var(--muted); transition: background .2s, color .2s; }
+.seg button[aria-pressed="true"] { background: linear-gradient(135deg, rgba(94,240,255,.22), rgba(201,162,255,.18)); color: var(--fg); box-shadow: inset 0 0 0 1px rgba(94,240,255,.45); }
+.cta { border: 0; border-radius: 16px; padding: 16px; font-family: var(--display); font-weight: 800; font-size: 18px; letter-spacing: .06em; color: #04101c;
+  background: linear-gradient(100deg, var(--cyan), #9fd0ff 55%, var(--violet)); box-shadow: 0 10px 40px -10px rgba(94,240,255,.7); transition: transform .15s; }
+.cta:active { transform: scale(.97); }
+.ghost { border: 1px solid var(--line); background: transparent; border-radius: 14px; padding: 12px; font-weight: 700; }
+.btns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.how { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.how li { display: grid; grid-template-columns: 54px 1fr; gap: 12px; align-items: center; font-size: 14px; line-height: 1.4; }
+.how b { color: var(--fg); }
+.how span { color: var(--muted); }
+.gest { width: 54px; height: 54px; border-radius: 14px; border: 1px solid var(--line); background: rgba(0,0,0,.3); }
+.foot { font-size: 12px; color: var(--muted); margin: 0; }
+#over .card { text-align: center; }
+#overTitle { font-family: var(--display); font-weight: 900; font-size: 44px; margin: 0; background: linear-gradient(100deg, #fff, var(--cyan), var(--violet)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+#overScore { font-family: var(--display); font-weight: 800; font-size: 30px; margin: 0; font-variant-numeric: tabular-nums; }
+#loading { position: fixed; inset: 0; z-index: 9; display: grid; place-items: center; align-content: center; gap: 14px; background: var(--ink); font-family: var(--display); font-weight: 800; letter-spacing: .1em; color: var(--cyan); text-align: center; padding-inline: 16px; }
+#loading::after { content: ""; width: 160px; height: 3px; border-radius: 3px; background: linear-gradient(90deg, transparent, var(--cyan), var(--violet), transparent); background-size: 200% 100%; animation: sheen 1s linear infinite; }
+.cta:disabled { opacity: .5; }
+#zones { position: fixed; inset: 0; z-index: 1; pointer-events: none; display: none; }
+body.duo.ingame #zones { display: grid; grid-template-rows: 1fr 1fr; }
+.zone { position: relative; }
+.zone span { position: absolute; left: 50%; transform: translateX(-50%); font-family: var(--display); font-weight: 800; font-size: 11px; letter-spacing: .16em; text-transform: uppercase; opacity: .55; }
+.z1 { order: -1; background: linear-gradient(180deg, rgba(201,162,255,.12), transparent 40%); border-bottom: 1px dashed rgba(201,162,255,.25); }
+.z1 span { top: calc(env(safe-area-inset-top, 0px) + 150px); color: var(--violet); transform: translateX(-50%) rotate(180deg); }
+.z0 { background: linear-gradient(0deg, rgba(94,240,255,.12), transparent 40%); }
+.z0 span { bottom: calc(env(safe-area-inset-bottom, 0px) + 70px); color: var(--cyan); }
+@media (orientation: landscape) {
+  body.duo.ingame #zones { grid-template-rows: none; grid-template-columns: 1fr 1fr; }
+  .z1 { order: 1; background: linear-gradient(270deg, rgba(201,162,255,.12), transparent 40%); border-bottom: 0; border-left: 1px dashed rgba(201,162,255,.25); }
+  .z0 { background: linear-gradient(90deg, rgba(94,240,255,.12), transparent 40%); }
+  .z1 span { transform: translateX(-50%); top: auto; bottom: calc(env(safe-area-inset-bottom, 0px) + 70px); }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before { animation-duration: .01s !important; } }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<canvas id="swipe"></canvas>
+<div id="flash"></div>
+
+<div id="hud" hidden>
+  <div class="team t0"><span class="srv" id="s0"></span><div class="who"><b id="n0">Вы</b><small id="c0"></small></div><span class="gms" id="g0">0</span><span class="pts" id="p0">0</span></div>
+  <div class="team t1"><span class="srv" id="s1"></span><div class="who"><b id="n1">Компьютер</b><small id="c1"></small></div><span class="gms" id="g1">0</span><span class="pts" id="p1">0</span></div>
+</div>
+<button id="pauseBtn" aria-label="Пауза"></button>
+<div id="banner"><span class="bt"></span><span class="bs"></span></div>
+<div id="zones" aria-hidden="true"><div class="zone z0"><span>Игрок 1</span></div><div class="zone z1"><span>Игрок 2</span></div></div>
+<div class="hint" id="hint0" hidden></div>
+<div class="hint" id="hint1" hidden></div>
+
+<section class="screen" id="menu">
+  <div class="card">
+    <h1 class="logo">Спин<span>Арена</span></h1>
+    <p class="tag">Настольный теннис в 3D один на один: настоящая физика вращения, крученые удары и критические смэши. Против робота X-Бота или вдвоём на одном телефоне.</p>
+    <div class="row"><label>Соперник</label>
+      <div class="seg" id="segOpp"><button data-v="cpu">Компьютер</button><button data-v="friend">Друг рядом</button></div></div>
+    <div class="row" id="diffRow"><label>Уровень</label>
+      <div class="seg" id="segDiff"><button data-v="easy">Новичок</button><button data-v="pro">Профи</button><button data-v="master">Мастер</button></div></div>
+    <div class="row"><label>Матч</label>
+      <div class="seg" id="segBest"><button data-v="1">1 партия</button><button data-v="3">до 2 побед</button><button data-v="5">до 3 побед</button></div></div>
+    <button class="cta" id="play" disabled>Играть</button>
+    <button class="ghost" id="howBtn">Как играть</button>
+    <p class="foot">Партия до 11 очков, нужен отрыв в 2. Подача переходит каждые 2 очка. Интернет нужен только для загрузки.</p>
+  </div>
+</section>
+
+<section class="screen" id="how" hidden>
+  <div class="card">
+    <h2 class="logo" style="font-size:30px">Как играть</h2>
+    <ul class="how">
+      <li><svg class="gest" viewBox="0 0 54 54"><path d="M27 42V14m0 0-8 8m8-8 8 8" stroke="#5ef0ff" stroke-width="3" fill="none" stroke-linecap="round"/></svg><div><b>Свайп к сопернику — удар.</b> <span>Свайпните в любой момент, пока мяч летит к вам: удар выполнится сам в нужную секунду. Длина и скорость свайпа — сила, наклон — направление. Точка на столе показывает, куда полетит мяч.</span></div></li>
+      <li><svg class="gest" viewBox="0 0 54 54"><path d="M20 42c14-6 14-22 8-28" stroke="#c9a2ff" stroke-width="3" fill="none" stroke-linecap="round"/></svg><div><b>Дуга — боковое вращение.</b> <span>Мяч закрутится и уйдёт в сторону изгиба после отскока.</span></div></li>
+      <li><svg class="gest" viewBox="0 0 54 54"><circle cx="27" cy="27" r="6" fill="#5ef0ff"/><path d="M27 14v-4M27 44v-4M14 27h-4M44 27h-4" stroke="#5ef0ff" stroke-width="2"/></svg><div><b>Тап или свайп к себе — подрезка.</b> <span>Короткий мяч с нижним вращением. Против подрезки сложно атаковать.</span></div></li>
+      <li><svg class="gest" viewBox="0 0 54 54"><circle cx="27" cy="27" r="18" stroke="#fff" stroke-width="2" fill="none"/><circle cx="27" cy="27" r="5" fill="#7dffb4"/></svg><div><b>Тайминг.</b> <span>Кольцо сжимается к мячу. Если отпустить палец, когда оно зелёное, удар идеальный, а сильный идеальный удар — КРИТ. Не успели — игрок сам поставит блок.</span></div></li>
+      <li><svg class="gest" viewBox="0 0 54 54"><rect x="12" y="8" width="30" height="38" rx="5" stroke="#8fa3cc" stroke-width="2" fill="none"/><path d="M12 27h30" stroke="#8fa3cc" stroke-dasharray="3 3"/></svg><div><b>Вдвоём на одном телефоне.</b> <span>Положите телефон между собой. Каждый свайпает на своей половине экрана: нижняя — Игрок 1, верхняя — Игрок 2.</span></div></li>
+    </ul>
+    <p class="foot">Игрок бежит к мячу сам, вам остаётся только бить.</p>
+    <button class="cta" id="howBack">Понятно</button>
+  </div>
+</section>
+
+<section class="screen" id="pause" hidden>
+  <div class="card">
+    <h2 class="logo" style="font-size:30px">Пауза</h2>
+    <button class="cta" id="resume">Продолжить</button>
+    <button class="ghost" id="soundBtn">Звук: вкл</button>
+    <button class="ghost" id="toMenu">Выйти в меню</button>
+  </div>
+</section>
+
+<section class="screen" id="over" hidden>
+  <div class="card">
+    <p id="overTitle">Победа</p>
+    <p id="overScore">2 : 1</p>
+    <p class="foot" id="overNames"></p>
+    <div class="btns"><button class="cta" id="again">Реванш</button><button class="ghost" id="overMenu">Меню</button></div>
+  </div>
+</section>
+
+<div id="loading">ЗАГРУЗКА ИГРОКОВ И АРЕНЫ…</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
