@@ -24,9 +24,9 @@ function sampleAt(samples, t) {
 }
 
 export const DIFF = {
-  easy:   { err: 0.12, speed: 0.45, place: 0.5, spin: 0.6, crit: 0.0, move: 4.4, critResp: 0.45, win: 1.35, tele: 0.65, reach: 1.3 },
-  pro:    { err: 0.05, speed: 0.65, place: 0.8, spin: 0.85, crit: 0.05, move: 5.2, critResp: 0.28, win: 1, tele: 0.5, reach: 1 },
-  master: { err: 0.02, speed: 0.9, place: 0.92, spin: 1, crit: 0.1, move: 6, critResp: 0.16, win: 0.85, tele: 0.35, reach: 0.85 },
+  easy:   { err: 0.12, speed: 0.45, place: 0.5, spin: 0.6, crit: 0.0, move: 4.4, critResp: 0.45, win: 1.35, tele: 0.65, reach: 1.3, loop: 0.0, sideP: 0.08, sideServe: 0.1, spinScale: 0.6 },
+  pro:    { err: 0.05, speed: 0.65, place: 0.8, spin: 0.85, crit: 0.05, move: 5.2, critResp: 0.28, win: 1, tele: 0.5, reach: 1, loop: 0.2, sideP: 0.2, sideServe: 0.3, spinScale: 0.85 },
+  master: { err: 0.02, speed: 0.8, place: 0.9, spin: 1, crit: 0.1, move: 6, critResp: 0.16, win: 0.85, tele: 0.35, reach: 0.95, loop: 0.35, sideP: 0.3, sideServe: 0.45, spinScale: 1 },
 };
 export const TEAM_STYLE = [
   { color: '#5ef0ff', accent: '#5ef0ff', hue: 192, hueAccent: 222 },
@@ -112,9 +112,10 @@ export class Match {
     const s = this.server, C = this.ball.p.clone(), dir = -s.side;
     const short = params.kind === 'push';
     const depth = short ? rnd(0.35, 0.55) : 0.75 + params.power * 0.45;
-    const target = new THREE.Vector3(clamp(params.lateral * 0.55, -0.62, 0.62), 0, dir * clamp(depth, 0.25, 1.22));
-    const top = short ? -rnd(160, 260) : 60 + params.power * 160;
-    const w = spinVector(new THREE.Vector3(target.x - C.x, 0, target.z - C.z), top, (params.side || 0) * 160);
+    const target = new THREE.Vector3(clamp(params.lateral * 0.55 * s.rs.x, -0.62, 0.62), 0, dir * clamp(depth, 0.25, 1.22));
+    const sc = params.spinScale ?? 1;
+    const top = (short ? -rnd(160, 260) : 60 + params.power * 160) * sc;
+    const w = spinVector(new THREE.Vector3(target.x - C.x, 0, target.z - C.z), top, -(params.side || 0) * 110 * sc);
     const v = solveServe(C, target, short ? 4.2 : 5.2 + params.power * 4.5, w);
     return { v, w, target };
   }
@@ -122,12 +123,14 @@ export class Match {
   buildShot(hitter, C, p) {
     const dir = -hitter.side;
     let depth, hs, top;
-    const side = (p.side || 0) * 140;
-    const lateral = clamp(p.lateral, -1, 1) * 0.64;
-    if (p.kind === 'push') { depth = rnd(0.45, 0.85); hs = rnd(4.2, 5.5); top = -rnd(140, 240); }
+    const sc = p.spinScale ?? 1;
+    const side = -(p.side || 0) * 90 * sc;   // positive = curves to the hitter's right
+    const lateral = clamp(p.lateral, -1, 1) * 0.64 * hitter.rs.x;
+    if (p.kind === 'push') { depth = rnd(0.45, 0.85); hs = rnd(4.2, 5.5); top = -(150 + 130 * (p.chop ?? Math.random())) * sc; }
+    else if (p.kind === 'loop') { depth = 0.85 + p.power * 0.35; hs = 7 + p.power * 7; top = (320 + p.power * 240) * sc; }
     else if (p.kind === 'smash') { depth = 0.9 + p.power * 0.3; hs = 20 + p.power * 8; top = 40; }
     else if (p.kind === 'block') { depth = rnd(0.6, 1.0); hs = rnd(4.3, 5.3); top = 20; }
-    else { depth = 0.7 + p.power * 0.55; hs = 7.5 + p.power * 11; top = 120 + p.power * 260; }
+    else { depth = 0.7 + p.power * 0.55; hs = 7.5 + p.power * 11; top = (110 + p.power * 190) * sc; }
     if (p.depth) depth = p.depth;
     if (p.crit) { hs *= 1.4; top = top * 1.7 + 120; depth = Math.max(depth, 1.08); }
     const target = new THREE.Vector3(lateral, 0, dir * clamp(depth, 0.2, 1.3));
@@ -158,6 +161,8 @@ export class Match {
     if (this.rally.serve) this.rally.serving = true;
     this.rally.lastCrit = !!quality.crit;
     if (!quality.serve) this.rallyHits++;
+    hitter.aimFace(shot.v);
+    this.players[1 - hitter.team].splitStep(this.now);
     this.snd.paddle(shot.v.length());
     if (navigator.vibrate && hitter.human) try { navigator.vibrate(quality.crit ? [30, 30, 60] : 14); } catch (e) {}
     this.fx.impactSquash();
@@ -174,7 +179,7 @@ export class Match {
       if (ev.type === 'table') {
         bounces++;
         if (this.rally.serving && bounces === 1) { if (ev.side !== -h.side) { ok = false; break; } continue; }
-        if (ev.side === h.side) bounceT = ev.t; else ok = false;
+        if (ev.side === h.side) { bounceT = ev.t; if (h.human) this.hooks.onTelegraph(new THREE.Vector3(ev.x, T.top, ev.z), 1 - h.team); } else ok = false;
         break;
       }
       if (ev.type === 'floor') { ok = false; break; }
@@ -230,14 +235,14 @@ export class Match {
     const crit = !miss && kind !== 'push' && Math.random() < (P.high || soft ? 0.25 + d.crit : d.crit * 0.3);
     const opp = this.players[1 - h.team];
     const away = -(Math.sign(opp.pos.x) || (Math.random() < 0.5 ? 1 : -1));
-    const lateral = Math.random() < 0.65 + 0.25 * press ? away * rnd(0.5 + 0.3 * press, 1) * d.place : rnd(-1, 1) * d.place;
+    const lateral = (Math.random() < 0.65 + 0.25 * press ? away * rnd(0.5 + 0.3 * press, 1) * d.place : rnd(-1, 1) * d.place) * h.rs.x;
+    if (kind === 'drive' && !soft && Math.random() < d.loop) kind = 'loop';
     P.ai = {
       kind, lateral, power: clamp(rnd(0.3, 1) * d.speed + press * 0.3 + (soft ? 0.35 : 0) + (kind === 'smash' ? 0.2 : 0), 0, 1),
-      side: Math.random() < 0.25 ? rnd(-1, 1) * d.spin : 0,
+      side: Math.random() < d.sideP ? (Math.random() < 0.5 ? -1 : 1) * rnd(0.4, 1) : 0, spinScale: d.spinScale,
       error: miss ? rnd(1.2, 2.4) : rnd(0, 0.3), crit, perfect: crit, whiff: miss && Math.random() < 0.15,
     };
-    P.ai.depth = kind === 'push' ? rnd(0.45, 0.8) : kind === 'smash' ? 1.05 : clamp(0.7 + P.ai.power * 0.55, 0.3, 1.25);
-    P.teleT = P.tc - d.tele; P.teleShown = false;
+    P.ai.depth = kind === 'push' ? rnd(0.45, 0.8) : kind === 'smash' ? 1.05 : kind === 'loop' ? clamp(0.85 + P.ai.power * 0.35, 0.3, 1.25) : clamp(0.7 + P.ai.power * 0.55, 0.3, 1.25);
     if (kind !== P.stroke && (kind === 'push' || kind === 'smash')) h.planSwing(kind, P.C, P.tc, h.fwd.clone(), this.now, P.stroke === 'bh');
   }
 
@@ -262,7 +267,7 @@ export class Match {
 
   resolveHuman(W) {
     const h = W.hitter, ball = this.ball;
-    const cov = this.coverage(h, ball.p.x, W.v);
+    const cov = W.cov || this.coverage(h, ball.p.x, W.v);
     if (cov.zone === 'out') { W.missed = true; W.missReason = 'far'; return; }
     const sw = this.hooks.swingState(h.team);      // { fwd, back, lat } in screen-heights per second
     const p = { side: 0 };
@@ -271,11 +276,15 @@ export class Match {
     else { p.kind = 'drive'; p.power = clamp((sw.fwd - 0.7) / 2.6, 0, 1); }
     if (W.high && p.kind === 'drive' && p.power > 0.45) p.kind = 'smash';
     // aim: the swing's sideways motion for strokes, the racket angle (contact offset) for blocks
-    const off = clamp((ball.p.x - this.racketX(h)) / cov.R, -1, 1);
-    if (p.kind === 'block') p.lateral = clamp(off * 0.8 + sw.lat * 0.4, -1, 1);
+    const off = clamp(((W.cov ? W.C.x : ball.p.x) - (W.cov ? W.racketAtLock ?? this.racketX(h) : this.racketX(h))) / cov.R, -1, 1);
+    if (p.kind === 'block') p.lateral = clamp(off * h.rs.x * 0.8 + sw.lat * 0.4, -1, 1);
     else p.lateral = clamp(sw.lat / Math.max(0.8, sw.fwd + sw.back) / 0.45, -1, 1);
-    p.side = clamp(sw.curve || 0, -1, 1);
     const sweet = cov.zone === 'sweet';
+    const q = sweet ? 1 : 0.6;                                       // a clean contact grips the ball
+    if (p.kind === 'drive' && sw.wind && p.power > 0.15) p.kind = 'loop';
+    p.side = clamp((sw.curve || 0) * q, -1, 1);
+    if (p.kind === 'push') p.chop = clamp((sw.back - 1.1) / 2, 0, 1) * q;
+    p.spinScale = p.kind === 'loop' ? q : 1;
     const charged = this.charge[h.team] >= CHARGE_MAX;
     p.perfect = sweet;
     p.crit = sweet && p.kind !== 'block' && p.kind !== 'push' && (p.kind === 'smash' || p.power >= 0.8 || charged);
@@ -290,6 +299,9 @@ export class Match {
     const top = W.spin.dot(new THREE.Vector3(0, 1, 0).cross(new THREE.Vector3(0, 0, h.side)));
     if (!sweet && (p.kind === 'drive' || p.kind === 'block') && top < -60) pitch -= THREE.MathUtils.degToRad(1.2 * Math.min(2, -top / 250));
     if (!sweet && p.kind === 'push' && top > 60) pitch += THREE.MathUtils.degToRad(1.4 * Math.min(2, top / 250));
+    if (!sweet && p.kind === 'block' && top > 120) pitch += THREE.MathUtils.degToRad(0.9 * Math.min(2, top / 300));
+    const inSide = W.spin.y * -h.side;                               // incoming sidespin, signed in world x
+    if (!sweet && Math.abs(inSide) > 50) yaw += THREE.MathUtils.degToRad(2.5 * Math.min(2, Math.abs(inSide) / 150) * (p.kind === 'block' ? 1.4 : 1));
     p.dev = { xSign: Math.sign(off) || 1, yaw, pitch };
     if (p.kind === 'block') p.depth = 0.75 + 0.2 * Math.random();
     this.rally.lastHuman = { lateral: p.lateral, perfect: sweet };
@@ -301,7 +313,7 @@ export class Match {
     if (!h.swing || h.swing.type !== type) h.planSwing(type, C, this.now, h.fwd.clone(), this.now - 0.4, rel < -0.05);
     this.holdLateral(h);
     const shot = this.buildShot(h, C, p);
-    this.launch(h, shot, { crit: p.crit, perfect: sweet, kind: p.kind, zone: cov.zone, charged });
+    this.launch(h, shot, { crit: p.crit, perfect: sweet, kind: p.kind, zone: cov.zone, charged, side: p.side });
   }
 
   holdLateral(h) { h.goal.x = h.ctrlX != null ? h.ctrlX - RACKET_OFFSET * h.rs.x : h.pos.x; }
@@ -378,7 +390,8 @@ export class Match {
       ball.p.copy(this.server.freeHand); ball.v.set(0, 0, 0); ball.w.set(0, 0, 0);
       if (!this.server.human && this.now > this.aiServeAt) {
         const d = DIFF[this.cfg.diff];
-        this.serve({ kind: Math.random() < 0.45 ? 'push' : 'drive', lateral: rnd(-1, 1) * d.place, power: rnd(0.2, 0.8) * d.speed, side: Math.random() < 0.5 ? rnd(-1, 1) : 0 });
+        this.serve({ kind: Math.random() < 0.45 ? 'push' : 'drive', lateral: rnd(-1, 1) * d.place, power: rnd(0.2, 0.8) * d.speed,
+          side: Math.random() < d.sideServe ? (Math.random() < 0.5 ? -1 : 1) * rnd(0.5, 1) : 0, spinScale: d.spinScale });
       }
     }
     if (this.state === 'toss' && this.now >= this.serveContact.t) {
@@ -390,17 +403,17 @@ export class Match {
     const P = this.pending;
     if (this.state === 'rally' && P && !P.none) {
       if (!P.hitter.human) {
-        if (!P.teleShown && this.now >= P.teleT) {
-          P.teleShown = true;
-          const dir = -P.hitter.side;
-          this.hooks.onTelegraph(new THREE.Vector3(clamp(P.ai.lateral, -1, 1) * 0.64, T.top, dir * P.ai.depth), P.hitter.team);
-        }
         if (this.now >= P.tc) {
           if (P.ai.whiff) this.pending = null;
           else this.launch(P.hitter, this.buildShot(P.hitter, ball.p.clone(), P.ai), { crit: P.ai.crit, perfect: P.ai.perfect, kind: P.ai.kind });
         }
       } else if (this.window) {
         const W = this.window;
+        if (!W.cov && this.now >= W.tIdeal - 0.15) {
+          W.cov = this.coverage(W.hitter, W.C.x, W.v);
+          W.racketAtLock = this.racketX(W.hitter);
+          if (W.cov.zone !== 'out' && W.hitter.swing) W.hitter.swing.lunge = true;
+        }
         if (!W.missed && this.now >= W.tIdeal) this.resolveHuman(W);
         if (W.missed && this.window === W) {
           this.hooks.onMissWindow(W, W.missReason);

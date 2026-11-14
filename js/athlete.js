@@ -221,6 +221,7 @@ export class Athlete {
     else if (type === 'smash') normal.copy(out).normalize().addScaledVector(UP, -0.2);
     else normal.copy(oh).addScaledVector(UP, -0.55);
     normal.addScaledVector(axis, -normal.dot(axis)).normalize();
+    if (type === 'bh' || (bh && type !== 'smash')) normal.negate();
   }
 
   planSwing(type, C, tc, out, now, bh = false) {
@@ -239,14 +240,27 @@ export class Athlete {
     s.qB = new THREE.Quaternion().setFromAxisAngle(UP, tw).multiply(s.qC);
     s.qF = new THREE.Quaternion().setFromAxisAngle(UP, -tw * 1.2).multiply(s.qC);
     this.swing = s;
+    s.lunge = !this.human;
     const g = this.goal.copy(C);
     if (s.bh) g.addScaledVector(R, 0.16).addScaledVector(F, -0.46);
     else if (type === 'smash') g.addScaledVector(R, -0.42).addScaledVector(F, -0.36);
     else if (type === 'serve') g.addScaledVector(R, -0.38).addScaledVector(F, -0.38);
     else g.addScaledVector(R, -0.55).addScaledVector(F, -0.36);
     g.y = 0;
+    s.stance = g.clone();
     return s;
   }
+
+  // Point the racket face along the ball's real outgoing direction (called at contact).
+  aimFace(out) {
+    const S = this.swing; if (!S) return;
+    const ax = new THREE.Vector3(), nm = new THREE.Vector3();
+    this.frameFor(S.type, out, ax, nm, S.bh);
+    S.qC.setFromRotationMatrix(m4.makeBasis(v3.crossVectors(ax, nm), ax, nm));
+    const tw = (S.bh ? -0.6 : 0.75) * (S.type === 'push' || S.type === 'serve' ? 0.4 : 1);
+    S.qF.setFromAxisAngle(UP, -tw * 1.2).multiply(S.qC);
+  }
+  splitStep(now) { this.splitT = now; }
 
   readyFrame(axis, normal, hand) {
     axis.copy(UP).multiplyScalar(0.7).addScaledVector(this.fwd, 0.5).addScaledVector(this.rs, 0.25).normalize();
@@ -268,7 +282,18 @@ export class Athlete {
     const minZ = T.halfL + 0.32;
     if (this.pos.z * this.side < minZ) { this.pos.z = this.side * minZ; this.vel.z = 0; }
     this.pos.x = clamp(this.pos.x, -3.3, 3.3);
+    const Sl = this.swing;
+    if (Sl && Sl.lunge && Sl.stance) {
+      const dl = now - Sl.tc;
+      if (dl > -0.2 && dl < 0.03) { // last-moment lunge so the blade really meets the ball
+        const k = 1 - Math.exp(-dt * 16);
+        this.pos.x += (Sl.stance.x - this.pos.x) * k; this.pos.z += (Sl.stance.z - this.pos.z) * k;
+        if (this.pos.z * this.side < minZ) this.pos.z = this.side * minZ;
+      }
+    }
     const speed = this.vel.length();
+    const gait = Math.min(speed / 3, 1);
+    this.phase = (this.phase || 0) + dt * (4 + speed * 3.2);
 
     // swing timeline
     const S = this.swing;
@@ -328,17 +353,23 @@ export class Athlete {
     root.updateMatrixWorld(true);
     const qRoot = root.quaternion;
     // hips: height + twist
-    const hipT = v1.set(this.pos.x, this.pelvisY + Math.abs(Math.sin(now * 13)) * Math.min(speed, 3) * 0.008, this.pos.z)
-      .addScaledVector(this.fwd, -0.04);
+    const split = this.splitT != null ? now - this.splitT : 9;
+    const splitDip = split < 0.3 ? Math.sin(Math.min(1, split / 0.3) * Math.PI) * 0.06 : 0;
+    const idle = (1 - gait) * Math.sin(now * 6.5) * 0.012 * (this.pose === 'ready' ? 1 : 0.3);
+    const bob = Math.abs(Math.sin(this.phase)) * gait * 0.035;
+    const hipT = v1.set(this.pos.x, this.pelvisY + bob + idle - splitDip, this.pos.z)
+      .addScaledVector(this.fwd, -0.04).addScaledVector(this.right, Math.sin(this.phase) * gait * 0.025);
     b.Hips.position.copy(b.Hips.parent.worldToLocal(hipT.clone()));
     b.Hips.updateMatrixWorld(true);
-    setWorldQ(b.Hips, q1.setFromAxisAngle(UP, twist * 0.3).multiply(b.Hips.getWorldQuaternion(q2)));
+    setWorldQ(b.Hips, q1.setFromAxisAngle(UP, twist * 0.3 + Math.sin(this.phase) * 0.1 * gait).multiply(b.Hips.getWorldQuaternion(q2)));
     const sadLean = this.pose === 'sad' ? (this.sadFull ? 0.3 : 0.08) : 0;
     this.lean = THREE.MathUtils.damp(this.lean, 0.3 + clamp(this._reach * 1.6, 0, 0.5) + sadLean, 10, dt);
     const leanAxis = v1.copy(this.right).negate();
-    const side = clamp(-this.vel.dot(this.right) * 0.025, -0.08, 0.08);
+    // lean into the run, counter-rotate the shoulders against the hips
+    const side = clamp(-this.vel.dot(this.right) * 0.055, -0.2, 0.2);
+    const counter = -Math.sin(this.phase) * 0.12 * gait;
     for (const n of ['Spine', 'Spine1', 'Spine2']) {
-      q1.setFromAxisAngle(leanAxis, this.lean / 3).multiply(q2.setFromAxisAngle(UP, twist * 0.22))
+      q1.setFromAxisAngle(leanAxis, this.lean / 3 + splitDip * 0.6).multiply(q2.setFromAxisAngle(UP, twist * 0.22 + counter / 3))
         .multiply(q3.setFromAxisAngle(this.fwd, side));
       setWorldQ(b[n], q1.multiply(b[n].getWorldQuaternion(this._q2)));
     }
@@ -354,16 +385,20 @@ export class Athlete {
     setWorldQ(b.Head, q1.multiply(hq));
 
     // right arm holds the racket
-    const gripC = v1.copy(this.racket.position).addScaledVector(axis, 0.045 * RK);
-    const palm = normal;                      // shakehand: palm faces like the red rubber
-    const wrist = this._s[5].copy(gripC).addScaledVector(axis, -0.06).addScaledVector(palm, -0.028);
+    // shakehand grip: palm on the red-face side, the handle runs diagonally across the palm
+    const gripC = v1.copy(this.racket.position).addScaledVector(axis, 0.05 * RK);
+    const palm = normal;
+    const across = this._s[9].crossVectors(palm, axis).normalize();          // toward the thumb
+    const handDir = this._hd || (this._hd = new THREE.Vector3());
+    handDir.copy(axis).multiplyScalar(0.62).addScaledVector(across, -0.78).normalize();
+    const wrist = this._s[5].copy(gripC).addScaledVector(handDir, -0.075).addScaledVector(palm, -0.03);
     const sR = b.RightArm.getWorldPosition(this._s[6]);
     const elbow = this._s[7], end = this._s[8];
     const pole = v2.copy(this.rs).multiplyScalar(0.5).addScaledVector(UP, -1).addScaledVector(this.fwd, -0.3);
     ik(sR, wrist, this.L.upper, this.L.fore, pole, elbow, end);
     this._reach = sR.distanceTo(wrist) - (this.L.upper + this.L.fore - 0.03);
     this.poseArm('Right', sR, elbow, end, qRoot);
-    this.poseHand('Right', axis, palm, qRoot, 1.15);
+    this.poseHand('Right', handDir, palm, qRoot, 1.25);
     const realWrist = b.RightHand.getWorldPosition(v2);
     const off = v3.subVectors(realWrist, wrist);
     this.racket.position.add(off); blade.add(off);
@@ -372,7 +407,7 @@ export class Athlete {
 
     // free arm
     if (!freeTarget) {
-      freeTarget = this._s[4].copy(this.pos).setY(this.pelvisY - 0.02).addScaledVector(this.fwd, 0.3).addScaledVector(this.rs, -0.28 - twist * 0.15);
+      freeTarget = this._s[4].copy(this.pos).setY(this.pelvisY + 0.02 + Math.abs(twist) * 0.12).addScaledVector(this.fwd, 0.28 + Math.sin(this.phase) * 0.14 * gait).addScaledVector(this.rs, -0.3 - twist * 0.2);
       if (this.hold) freeTarget.copy(this.pos).setY(1.0).addScaledVector(this.fwd, 0.36).addScaledVector(this.rs, -0.05);
       if (this.tossT >= 0) { const tt = now - this.tossT, k = clamp(tt / 0.25, 0, 1); freeTarget.y += Math.sin(k * Math.PI * 0.5) * 0.45 * (1 - clamp((tt - 0.5) / 0.3, 0, 1)); }
     }
@@ -388,11 +423,11 @@ export class Athlete {
     for (let i = 0; i < 2; i++) {
       const f = this.feet[i], other = this.feet[1 - i];
       if (f.t < 1) {
-        f.t = Math.min(1, f.t + dt / 0.13);
-        f.p.lerpVectors(f.from, f.to, ease(f.t)); f.p.y = Math.sin(f.t * Math.PI) * 0.07;
+        f.t = Math.min(1, f.t + dt / (0.15 - 0.04 * gait));
+        f.p.lerpVectors(f.from, f.to, ease(f.t)); f.p.y = Math.sin(f.t * Math.PI) * (0.06 + 0.05 * gait);
       } else if (other.t >= 1) {
         this.footTarget(f, tgt);
-        if (tgt.distanceTo(f.p) > 0.1) { f.from.copy(f.p); f.to.copy(tgt).addScaledVector(this.vel, 0.08); f.to.y = 0; f.t = 0; }
+        if (tgt.distanceTo(f.p) > 0.09) { f.from.copy(f.p); f.to.copy(tgt).addScaledVector(this.vel, 0.11); f.to.y = 0; f.t = 0; }
       }
     }
     for (let i = 0; i < 2; i++) {

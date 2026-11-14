@@ -77,7 +77,16 @@ function hooks() {
     onHit(hitter, shot, q, p) {
       fx.showMarker(null);
       const speed = shot.v.length(), col = TEAM_STYLE[hitter.team].color;
-      fx.trailColor.set(q.crit ? 0x8ff6ff : col);
+      const dirZ = -hitter.side;
+      const topC = shot.w.dot(new THREE.Vector3(0, 1, 0).cross(new THREE.Vector3(0, 0, dirZ)));
+      const sideC = Math.abs(shot.w.y);
+      // spin you can read: topspin = cyan, backspin = violet, sidespin = mint
+      fx.trailColor.set(q.crit ? 0x8ff6ff : sideC > 90 ? 0x7dffb4 : topC > 230 ? 0x5ef0ff : topC < -90 ? 0xb48cff : col);
+      if (!demo && hitter.human && !q.crit) {
+        if (q.kind === 'loop') feedback(hitter.team, 'Топспин', 'good');
+        else if (Math.abs(q.side || 0) > 0.35) feedback(hitter.team, 'Крученый', 'good');
+        else if (q.kind === 'push' && topC < -200) feedback(hitter.team, 'Подрезка', 'good');
+      }
       fx.trailHeat = q.crit ? 1 : clamp((speed - 8) / 18, 0, 0.6);
       fx.burst(p, q.crit ? 80 : 10, q.crit ? 0x8ff6ff : col, q.crit ? 6 : 2.2, q.crit ? 0.09 : 0.04, q.crit ? 0.9 : 0.35);
       if (q.crit) {
@@ -196,6 +205,8 @@ function updateCamera(dt) {
       L = new THREE.Vector3(0, 0.8, 0).lerp(L, e);
       k = 1 - Math.exp(-dt * 6);
       if (t >= 1) cine = null;
+    } else if (cine.kind === 'fixed') {
+      P = cine.P.clone(); L = cine.L.clone(); camUp.set(0, 1, 0); fov = cine.fov || 30; k = 1;
     } else if (cine.kind === 'outro') {
       // slow victory orbit around the winner, then rise over the whole court
       const w = match.players[cine.team ?? 0];
@@ -263,7 +274,7 @@ const humanPlayer = team => match && !demo ? match.players[team] : null;
 // Finger motion over the last ~140 ms, in screen-heights per second.
 function swingState(team) {
   const tr = trails[team], now = performance.now();
-  const out = { fwd: 0, back: 0, lat: 0, curve: 0 };
+  const out = { fwd: 0, back: 0, lat: 0, curve: 0, wind: false };
   if (!tr.length || now - lifted[team] > 160 && !isDown(team)) return out;
   const B = teamBasis(team), norm = Math.min(innerWidth, innerHeight);
   const at = dt => { const t = now - dt; let best = tr[0]; for (const p of tr) if (p.t <= t) best = p; return best; };
@@ -278,7 +289,12 @@ function swingState(team) {
   const s1 = seg(p0, p1), s2 = seg(p1, p2);
   const fast = s2.f >= s1.f ? s2 : s1;
   out.fwd = Math.max(0, fast.f); out.back = Math.max(0, -Math.min(s1.f, s2.f)); out.lat = fast.l;
-  out.curve = clamp((s2.l - s1.l) * 0.25, -1, 1);
+  // the stroke bends: sideways speed changes during the push
+  out.curve = out.fwd > 0.7 ? clamp((s2.l - s1.l) / Math.max(1, out.fwd) * 1.6, -1, 1) : 0;
+  // a short pull back right before the push = brushing low-to-high (topspin loop)
+  const e0 = at(340), e1 = at(200);
+  const early = seg(e0, e1);
+  out.wind = out.fwd > 0.9 && early.f < -0.35 && e1 !== e0;
   return out;
 }
 function isDown(team) { for (const tr of touches.values()) if (tr.team === team) return true; return false; }
@@ -294,9 +310,14 @@ function flickParams(tr) {
   const dur = Math.max(0.03, (e.t - s.t) / 1000);
   const f = vec.dot(B.f), l = vec.dot(B.r);
   if (len < 24) return null;
-  if (f < -len * 0.5) return { kind: 'push', lateral: clamp(Math.atan2(l, -f) / 0.5, -1, 1), power: 0.3, side: 0 };
+  // curvature: how far the path bows away from its chord, signed toward the player's right
+  let bow = 0;
+  const n = new THREE.Vector2(-vec.y / len, vec.x / len);
+  for (let k = i; k < pts.length; k++) { const d = (pts[k].x - s.x) * n.x + (pts[k].y - s.y) * n.y; if (Math.abs(d) > Math.abs(bow)) bow = d; }
+  const side = clamp(-bow / len * (Math.sign(n.dot(B.r)) || 1) * 4, -1, 1);
+  if (f < -len * 0.5) return { kind: 'push', lateral: clamp(Math.atan2(l, -f) / 0.5, -1, 1), power: 0.3, side };
   if (f < len * 0.4) return null;
-  return { kind: 'drive', lateral: clamp(Math.atan2(l, f) / 0.5, -1, 1), power: clamp(0.45 * (len / norm) / 0.32 + 0.55 * (len / dur / norm) / 3.2, 0, 1), side: 0 };
+  return { kind: 'drive', lateral: clamp(Math.atan2(l, f) / 0.5, -1, 1), power: clamp(0.45 * (len / norm) / 0.32 + 0.55 * (len / dur / norm) / 3.2, 0, 1), side };
 }
 
 function pushSample(team, x, y, t) {
@@ -512,7 +533,9 @@ function frame(nowMs) {
   const rdt = Math.min(0.05, (nowMs - last) / 1000); last = nowMs;
   tick(rdt);
 }
-function tick(rdt, draw = true) {
+let liveFrozen = false;   // debug: stop the live loop so stepped frames can be inspected
+function tick(rdt, draw = true, forced = false) {
+  if (liveFrozen && !forced) { composer.render(0); return; }
   realT += rdt;
   // the whole match runs a touch slower than real time: easier to read, still real physics
   const base = demo ? 1 : GAME_SPEED;
@@ -549,7 +572,9 @@ function tick(rdt, draw = true) {
 
 // debug handle for automated checks
 window.__game = { get match() { return match; }, fx, camera, get camMode() { return camMode; }, get cine() { return cine; },
-  step(n = 1, dt = 1 / 60) { for (let i = 0; i < n; i++) tick(dt, i === n - 1); } };
+  photo(P, L, fov) { cine = { kind: 'fixed', P: new THREE.Vector3(...P), L: new THREE.Vector3(...L), fov, t0: realT, dur: 1e9 }; },
+  step(n = 1, dt = 1 / 60) { for (let i = 0; i < n; i++) tick(dt, i === n - 1, true); },
+  freeze(v = true) { liveFrozen = v; } };
 screen('menu');
 requestAnimationFrame(frame);
 loadModels().then(m => {
