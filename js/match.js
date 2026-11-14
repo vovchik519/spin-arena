@@ -10,8 +10,9 @@ const clamp = THREE.MathUtils.clamp;
 export const HUMAN_SPEED = 10;          // m/s, the legs limit you, not the finger
 const RACKET_OFFSET = 0.32;            // racket sits this far to the racket-hand side of the body
 const SWEET = 0.1;
-const LATE_WINDOW = 0.09;              // a stroke up to this long after the ideal moment still connects
-const BASE_DEPTH = T.halfL + 0.62;     // the human's ready line behind the end line                    // half-width of the racket's sweet spot, m
+const LATE_WINDOW = 0.09;
+const STROKE_FWD = 0.55, STROKE_BACK = 0.9;   // finger speed (screen heights/s) that counts as a stroke              // a stroke up to this long after the ideal moment still connects
+const BASE_DEPTH = T.halfL + 0.5;     // the human's ready line behind the end line                    // half-width of the racket's sweet spot, m
 export const CHARGE_MAX = 3;           // clean hits in a row that load a super shot
 
 // Timing windows around the ideal contact moment; they tighten as the ball gets faster.
@@ -131,7 +132,7 @@ export class Match {
     if (p.kind === 'push') { depth = rnd(0.45, 0.85); hs = rnd(4.2, 5.5); top = -(150 + 130 * (p.chop ?? Math.random())) * sc; }
     else if (p.kind === 'loop') { depth = 0.85 + p.power * 0.35; hs = 7 + p.power * 7; top = (320 + p.power * 240) * sc; }
     else if (p.kind === 'smash') { depth = 0.9 + p.power * 0.3; hs = 20 + p.power * 8; top = 40; }
-    else if (p.kind === 'block') { depth = rnd(0.6, 1.0); hs = rnd(4.3, 5.3); top = 20; }
+    else if (p.kind === 'block') { depth = rnd(0.7, 1.05); hs = rnd(5.6, 6.8); top = 40; }
     else { depth = 0.55 + p.power * 0.95; hs = 7.5 + p.power * 11; top = (110 + p.power * 190) * sc; }   // flat and too hard = long
     if (p.depth) depth = p.depth;
     if (p.crit) { hs *= 1.4; top = top * 1.7 + 120; depth = Math.max(depth, 1.08); }
@@ -201,15 +202,20 @@ export class Match {
       else if (Math.abs(s.p.z) < T.halfL - 0.1) best = s;
       else break;
     }
-    // a human meets the ball a little later, as it starts to drop at the ready line:
-    // more time to get there, and still a natural hitting height
-    if (best && h.human) {
+    // a human may meet the ball just after its peak (a little more time), but only while it is
+    // still above net height and close to the end line, so the return can be flat, not a lob
+    if (h.human) {
+      // humans meet the ball close to the end line: the highest point the ball reaches
+      // between its bounce and 40 cm behind the table (never far back, never a lob from the floor)
+      let hb = null, first = null;
       for (const s2 of pr.samples) {
-        if (s2.t <= best.t) continue;
-        if (s2.p.y < T.top + 0.12 || Math.abs(s2.p.z) > BASE_DEPTH - 0.1) break;
-        best = s2;
-        if (s2.p.y < apexY - 0.12) break;
+        if (s2.t < bounceT + 0.012) continue;
+        if (!first) first = s2;                       // fast balls: right after the bounce
+        if (Math.abs(s2.p.z) > T.halfL + 0.45) break;
+        if (s2.p.y < T.top + 0.06 && s2.v.y < 0) break;
+        if (!hb || s2.p.y >= hb.p.y - 0.01) hb = s2;
       }
+      best = hb || first || best;
     }
     if (!best) { this.pending = { hitter: h, none: true }; return; }
     const tc = this.now + best.t, C = best.p.clone();
@@ -282,13 +288,13 @@ export class Match {
     const h = W.hitter, ball = this.ball;
     if (!sw.touching) { W.missed = true; W.missReason = 'none'; return; }   // no finger, no racket
     // swinging lets you stretch for a wide ball (an extra ~15 cm), standing still does not
-    const swinging = sw.fwd > 0.7 || sw.back > 1.1;
+    const swinging = sw.fwd > STROKE_FWD || sw.back > STROKE_BACK;
     const cov = this.coverage(h, ball.p.x, W.v, swinging ? 0.15 : 0);
     if (cov.zone === 'out') { W.missed = true; W.missReason = 'far'; return; }
     const p = { side: 0 };
-    if (sw.back > 1.1 && sw.back > sw.fwd) { p.kind = 'push'; p.power = 0.3; }
-    else if (sw.fwd < 0.7) { p.kind = 'block'; p.power = 0.15; }
-    else { p.kind = 'drive'; p.power = clamp((sw.fwd - 0.7) / 2.6, 0, 1); }
+    if (sw.back > STROKE_BACK && sw.back > sw.fwd) { p.kind = 'push'; p.power = 0.3; }
+    else if (sw.fwd < STROKE_FWD) { p.kind = 'block'; p.power = 0.15; }
+    else { p.kind = 'drive'; p.power = clamp((sw.fwd - STROKE_FWD) / 2.6, 0, 1); }
     if (W.high && p.kind === 'drive' && p.power > 0.45) p.kind = 'smash';
     // aim: the swing's sideways motion for strokes, the racket angle (contact offset) for blocks
     const off = clamp((ball.p.x - this.racketX(h)) / cov.R, -1, 1);
@@ -319,8 +325,11 @@ export class Match {
     const inSide = W.spin.y * -h.side;                               // incoming sidespin, signed in world x
     if (!sweet && Math.abs(inSide) > 50) yaw += THREE.MathUtils.degToRad(2.5 * Math.min(2, Math.abs(inSide) / 150) * (p.kind === 'block' ? 1.4 : 1));
     // a late stroke meets the ball behind the body: it leaves wide toward the racket side and lower
-    if (late > 0.01) { const lk = Math.min(1, late / LATE_WINDOW); yaw += THREE.MathUtils.degToRad(9 * lk); pitch -= THREE.MathUtils.degToRad(2 * lk); }
-    p.dev = { xSign: late > 0.01 ? h.rs.x : Math.sign(off) || 1, yaw, pitch };
+    if (late > 0.01) { const lk = Math.min(1, late / (W.lateCap || LATE_WINDOW)); yaw += THREE.MathUtils.degToRad(9 * lk); pitch -= THREE.MathUtils.degToRad(2 * lk); }
+    // a stroke made well before the ball arrived: pulled cross-court and a touch long
+    const early = sw.early || 0;
+    if (early > 0.08) { const ek = Math.min(1, (early - 0.08) / 0.2); yaw += THREE.MathUtils.degToRad(7 * ek); pitch += THREE.MathUtils.degToRad(1.2 * ek); }
+    p.dev = { xSign: late > 0.01 ? h.rs.x : early > 0.08 ? -h.rs.x : Math.sign(off) || 1, yaw, pitch };
     if (p.kind === 'block') p.depth = 0.75 + 0.2 * Math.random();
     this.rally.lastHuman = { lateral: p.lateral, perfect: sweet };
     // swing the racket through the real contact point
@@ -330,10 +339,13 @@ export class Match {
     // the stroke starts now, from the player's gesture; a short lunge brings the blade onto the ball
     h.planSwing(type, C, this.now, h.fwd.clone(), this.now - 0.1, rel < -0.05);
     h.swing.lunge = true;
-    const st = h.swing.stance, jump = Math.min(1, 0.32 / Math.max(0.001, Math.hypot(st.x - h.pos.x, st.z - h.pos.z)));
+    const st = h.swing.stance;
+    if (Math.abs(st.z) > Math.abs(h.pos.z)) st.z = h.pos.z;
+    const jump = Math.min(1, 0.32 / Math.max(0.001, Math.hypot(st.x - h.pos.x, st.z - h.pos.z)));
     h.pos.x += (st.x - h.pos.x) * 0.6 * jump; h.pos.z += (st.z - h.pos.z) * 0.6 * jump;
     this.holdLateral(h);
     const shot = this.buildShot(h, C, p);
+    this.hooks.consumeStroke?.(h.team);
     this.launch(h, shot, { crit: p.crit, perfect: sweet, kind: p.kind, zone: cov.zone, charged, side: p.side });
   }
 
@@ -437,10 +449,12 @@ export class Match {
         if (!W.missed && this.now >= W.tIdeal) {
           const sw = this.hooks.swingState(W.hitter.team);
           const late = this.now - W.tIdeal;
-          const stroke = sw.fwd > 0.7 || sw.back > 1.1;
+          const stroke = sw.fwd > STROKE_FWD || sw.back > STROKE_BACK;
           // a held racket blocks right away; only a stroke may come a little late (not after the ball drops)
           const dropping = ball.p.y < T.top + 0.1;
-          if (stroke || late >= LATE_WINDOW || !sw.touching || dropping || (late >= 0.03 && sw.fwd < 0.3)) this.resolveHuman(W, sw, stroke ? late : 0);
+          // a late stroke may only catch the ball within ~20 cm of the contact point, however fast it is
+          W.lateCap = Math.min(LATE_WINDOW, 0.2 / Math.max(4, ball.v.length()));
+          if (stroke || late >= W.lateCap || !sw.touching || dropping || (late >= 0.015 && sw.fwd < 0.3)) this.resolveHuman(W, sw, stroke ? late : 0);
         }
         if (W.missed && this.window === W) {
           this.hooks.onMissWindow(W, W.missReason);

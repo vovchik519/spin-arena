@@ -55,8 +55,9 @@ function hooks() {
       if (server.human) showHint(server.team, tutorial > 0 ? 'Подача: резкий свайп к сопернику · к себе — короткая с подрезкой' : 'Ваша подача');
       else showHint(null);
     },
-    swingState,
+    swingState, consumeStroke,
     onWindow(W) {
+      consumeStroke(W.hitter.team);   // a swipe made before the opponent's shot does not count for this ball
       if (demo || tutorial <= 0) return;
       showHint(W.hitter.team, tutorial >= 3 ? 'Держите палец на экране — это ракетка. Совместите кольца на полу'
         : tutorial === 2 ? 'Когда мяч подлетает, резко двиньте палец вперёд. Палец на месте — блок'
@@ -178,6 +179,7 @@ function gameplayCam(aspect) {
   return { P, L, fov };
 }
 function updateCamera(dt) {
+  if (!innerWidth || !innerHeight) return;   // a hidden/zero-size view has no aspect ratio
   // a bad frame (NaN) must never poison the smoothed camera state
   if (!finite(camPos)) camPos.set(5, 3, 5);
   if (!finite(camLook)) camLook.set(0, 0.8, 0);
@@ -263,6 +265,7 @@ function teamForPoint(x, y) {
 }
 // absolute mapping: the width of your half spans the court from -1.3 m to +1.3 m
 function fingerToCourtX(team, x, y) {
+  if (!innerWidth || !innerHeight) return null;
   const B = teamBasis(team);
   if (!Number.isFinite(B.xs.x) || B.xs.lengthSq() < 0.5) return null;
   const horiz = Math.abs(B.xs.x) >= Math.abs(B.xs.y);
@@ -273,7 +276,8 @@ function fingerToCourtX(team, x, y) {
 const humanPlayer = team => match && !demo ? match.players[team] : null;
 
 // Finger motion over the last ~140 ms, in screen-heights per second.
-function swingState(team) {
+function measureMotion(team) {
+  if (!innerWidth || !innerHeight) return { fwd: 0, back: 0, lat: 0, curve: 0, wind: false, touching: false };
   const tr = trails[team], now = performance.now();
   // touching: the finger is on the screen (or left it a moment ago) — you are holding the racket
   const out = { fwd: 0, back: 0, lat: 0, curve: 0, wind: false, touching: isDown(team) || now - lifted[team] < 160 };
@@ -299,6 +303,29 @@ function swingState(team) {
   out.wind = out.fwd > 0.9 && early.f < -0.35 && e1 !== e0;
   return out;
 }
+// A stroke is remembered for a moment, so a swipe made a bit before the ball arrives
+// (or one that ends with the finger leaving the screen) still counts.
+const STROKE_MEMORY = 380;     // ms
+const strokes = [null, null];
+function noteMotion(team) {
+  const m = measureMotion(team), t = performance.now();
+  if (m.fwd < 0.55 && m.back < 0.9) return;
+  const cur = strokes[team];
+  if (!cur || t - cur.t > STROKE_MEMORY) { strokes[team] = { ...m, t, peak: t }; return; }
+  // same gesture still going: keep its strongest moment
+  if (m.fwd + m.back > cur.fwd + cur.back) Object.assign(cur, m, { peak: t });
+  cur.t = t;
+  cur.wind = cur.wind || m.wind;
+}
+function swingState(team) {
+  const live = measureMotion(team), now = performance.now(), st = strokes[team];
+  if (st && now - st.peak < STROKE_MEMORY) {
+    // seconds of game time between the stroke and now: a big gap means an early stroke
+    return { ...st, touching: true, early: (now - st.peak) / 1000 * GAME_SPEED };
+  }
+  return { ...live, early: 0 };
+}
+function consumeStroke(team) { strokes[team] = null; }
 function isDown(team) { for (const tr of touches.values()) if (tr.team === team) return true; return false; }
 
 function flickParams(tr) {
@@ -335,7 +362,7 @@ canvas.addEventListener('pointerdown', e => {
   if (demo || paused || !match || cine) return;
   const team = teamForPoint(e.clientX, e.clientY);
   if (team < 0 || isDown(team)) return;          // one finger per player
-  canvas.setPointerCapture?.(e.pointerId);
+  try { canvas.setPointerCapture?.(e.pointerId); } catch (err) { /* capture is optional */ }
   const t = performance.now();
   trails[team].length = 0;
   touches.set(e.pointerId, { team, pts: [{ x: e.clientX, y: e.clientY, t }] });
@@ -347,6 +374,7 @@ canvas.addEventListener('pointermove', e => {
   tr.pts.push({ x: e.clientX, y: e.clientY, t });
   if (tr.pts.length > 80) tr.pts.splice(1, 1);
   pushSample(tr.team, e.clientX, e.clientY, t);
+  noteMotion(tr.team);
 });
 const endTouch = e => {
   const tr = touches.get(e.pointerId); if (!tr) return;
@@ -355,6 +383,7 @@ const endTouch = e => {
   tr.pts.push({ x: e.clientX, y: e.clientY, t });
   pushSample(tr.team, e.clientX, e.clientY, t);
   lifted[tr.team] = t;
+  noteMotion(tr.team);
   tr.fade = 1; fading.push(tr);
   if (!match || demo || paused) return;
   // serving: a flick toward the opponent is a long serve, a tap or pull-back is a short one
@@ -518,6 +547,7 @@ function showOver(team) {
 // ------------------------------------------------------------ loop
 function resize() {
   const w = innerWidth, h = innerHeight;
+  if (!w || !h) return;
   renderer.setSize(w, h, false);
   const pr = renderer.getPixelRatio();
   composer.setPixelRatio(pr); composer.setSize(w, h);
